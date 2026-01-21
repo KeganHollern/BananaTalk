@@ -54,6 +54,6 @@ sudo systemctl start coturn
 ## Roadmap
 
 - [x] **Phase 1: Walking Skeleton** (Signaling, Matching, Basic P2P)
-- [ ] **Phase 2: Auth & Matching Logic** (Phone auth, Redis queue)
+- [ ] **Phase 2: Auth & Matching Logic** (Social Auth, Redis queue)
 - [ ] **Phase 3: Safety & Refinement** (Reporting, Screenshot capture)
 - [ ] **Phase 4: Production** (Load testing, App Store submission)

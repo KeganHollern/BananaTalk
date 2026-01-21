@@ -24,7 +24,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/frontend/lib/main.dart",
       "cwd": "${workspaceFolder}/frontend",
-      "deviceId": "iphonesimulator"
+      "deviceId": "2A34E33C-216E-42BE-BA9A-EB73F4F46D47"
     },
     {
       "name": "Flutter (macOS)",
