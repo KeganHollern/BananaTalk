@@ -9,7 +9,10 @@ Thumbs.db
 
 # IDEs and editors
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
 *.swp
 *.swo
 *.iml

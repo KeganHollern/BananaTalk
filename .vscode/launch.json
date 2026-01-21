@@ -1,0 +1,56 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend (Go)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/backend/main.go",
+      "cwd": "${workspaceFolder}/backend",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Flutter (Android)",
+      "type": "dart",
+      "request": "launch",
+      "program": "${workspaceFolder}/frontend/lib/main.dart",
+      "cwd": "${workspaceFolder}/frontend",
+      "deviceId": "android"
+    },
+    {
+      "name": "Flutter (iOS Simulator)",
+      "type": "dart",
+      "request": "launch",
+      "program": "${workspaceFolder}/frontend/lib/main.dart",
+      "cwd": "${workspaceFolder}/frontend",
+      "deviceId": "iphonesimulator"
+    },
+    {
+      "name": "Flutter (macOS)",
+      "type": "dart",
+      "request": "launch",
+      "program": "${workspaceFolder}/frontend/lib/main.dart",
+      "cwd": "${workspaceFolder}/frontend",
+      "deviceId": "macos",
+      "flutterMode": "debug"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full App (Android)",
+      "configurations": ["Backend (Go)", "Flutter (Android)"],
+      "stopAll": true
+    },
+    {
+      "name": "Full App (iOS)",
+      "configurations": ["Backend (Go)", "Flutter (iOS Simulator)"],
+      "stopAll": true
+    },
+    {
+      "name": "Full App (macOS)",
+      "configurations": ["Backend (Go)", "Flutter (macOS)"],
+      "stopAll": true
+    }
+  ]
+}
