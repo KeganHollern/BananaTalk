@@ -23,6 +23,14 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// --- CONFIGURATION ---
+// For Local Desktop: 'localhost'
+// For Android Emulator: '10.0.2.2'
+// For physical devices or iOS Simulator: Use your computer's local IP (e.g., '192.168.1.27')
+const String serverAddress = 'localhost'; 
+const String serverUrl = 'ws://$serverAddress:8080/ws';
+// ---------------------
+
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -31,7 +39,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final Signaling _signaling = Signaling('ws://localhost:8080/ws');
+  final Signaling _signaling = Signaling(serverUrl);
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   bool _inCall = false;
