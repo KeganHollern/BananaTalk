@@ -5,10 +5,17 @@ on:
     branches: ["main", "master"]
     paths:
       - "frontend/**"
+      - ".github/workflows/frontend.yml"
   pull_request:
     branches: ["main", "master"]
     paths:
       - "frontend/**"
+      - ".github/workflows/frontend.yml"
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: "Git Ref (Optional) - Commit SHA, Branch, or Tag"
+        required: false
 
 jobs:
   build-android:
@@ -19,6 +26,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git-ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -52,6 +61,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git-ref }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
