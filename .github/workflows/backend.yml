@@ -52,7 +52,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./backend
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/${{ env.REPO_OWNER }}/bananatalk-backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
