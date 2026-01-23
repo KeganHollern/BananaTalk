@@ -1,8 +1,9 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -33,22 +34,28 @@ var (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	http.HandleFunc("/ws", handleConnections)
+	http.HandleFunc("/", handleNotFound)
 
 	port := ":8080"
 	// Start matching loop
 	go matchingLoop()
 
+	slog.Info("BananaTalk Backend starting", "port", port)
 	err := http.ListenAndServe(port, nil)
 	if err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		slog.Error("ListenAndServe failed", "error", err)
+		os.Exit(1)
 	}
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Print("upgrade:", err)
+		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
 	defer conn.Close()
@@ -61,7 +68,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clients[clientID] = client
 	clientsMu.Unlock()
 
-	log.Printf("Client connected: %s", clientID)
+	slog.Info("Client connected", "client_id", clientID)
 
 	// Send ID to client
 	client.Conn.WriteJSON(Message{
@@ -70,13 +77,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Add to match queue
+	slog.Info("Adding client to match queue", "client_id", clientID)
 	matchQueue <- client
 
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("error: %v", err)
+			slog.Error("ReadJSON error", "client_id", clientID, "error", err)
 			break
 		}
 
@@ -87,7 +95,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Lock()
 	delete(clients, clientID)
 	clientsMu.Unlock()
-	log.Printf("Client disconnected: %s", clientID)
+	slog.Info("Client disconnected", "client_id", clientID)
 }
 
 func matchingLoop() {
@@ -95,7 +103,7 @@ func matchingLoop() {
 		c1 := <-matchQueue
 		c2 := <-matchQueue
 
-		log.Printf("Matching %s with %s", c1.ID, c2.ID)
+		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
 
 		// Notify both clients they are matched
 		c1.Conn.WriteJSON(Message{
@@ -121,7 +129,14 @@ func handleMessage(msg Message) {
 	if ok {
 		err := target.Conn.WriteJSON(msg)
 		if err != nil {
-			log.Printf("Failed to send message to %s: %v", msg.To, err)
+			slog.Error("Failed to send message", "to", msg.To, "error", err)
 		}
 	}
+}
+
+func handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		slog.Info("Redirecting 404", "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+	}
+	http.Redirect(w, r, "https://lystic.dev", http.StatusFound)
 }

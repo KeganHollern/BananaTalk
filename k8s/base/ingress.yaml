@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bananatalk-backend
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100M"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: bt.lystic.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: bananatalk-backend
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - bt.lystic.dev
+      secretName: bananatalk-backend-tls
