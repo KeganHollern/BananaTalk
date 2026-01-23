@@ -19,6 +19,14 @@
       "deviceId": "android"
     },
     {
+      "name": "Flutter (Pixel 10)",
+      "type": "dart",
+      "request": "launch",
+      "program": "${workspaceFolder}/frontend/lib/main.dart",
+      "cwd": "${workspaceFolder}/frontend",
+      "deviceId": "58101FDCH000BC"
+    },
+    {
       "name": "Flutter (iOS Simulator)",
       "type": "dart",
       "request": "launch",
