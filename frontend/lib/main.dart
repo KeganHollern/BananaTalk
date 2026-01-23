@@ -29,8 +29,7 @@ class MyApp extends StatelessWidget {
 // For Local Desktop: 'localhost'
 // For Android Emulator: '10.0.2.2'
 // For physical devices or iOS Simulator: Use your computer's local IP (e.g., '192.168.1.27')
-const String serverAddress = 'localhost';
-const String serverUrl = 'ws://$serverAddress:8080/ws';
+const String serverUrl = 'wss://bt.lystic.dev/ws';
 // ---------------------
 
 class ChatScreen extends StatefulWidget {
