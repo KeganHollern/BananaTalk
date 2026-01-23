@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 import 'signaling.dart';
 
 void main() {
@@ -27,7 +29,7 @@ class MyApp extends StatelessWidget {
 // For Local Desktop: 'localhost'
 // For Android Emulator: '10.0.2.2'
 // For physical devices or iOS Simulator: Use your computer's local IP (e.g., '192.168.1.27')
-const String serverAddress = 'localhost'; 
+const String serverAddress = 'localhost';
 const String serverUrl = 'ws://$serverAddress:8080/ws';
 // ---------------------
 
@@ -74,11 +76,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _join() async {
-    await _signaling.openUserMedia();
-    await _signaling.connect();
-    setState(() {
-      _inCall = true;
-    });
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.camera,
+      Permission.microphone,
+    ].request();
+
+    if (statuses[Permission.camera]!.isGranted &&
+        statuses[Permission.microphone]!.isGranted) {
+      await _signaling.openUserMedia();
+      await _signaling.connect();
+      setState(() {
+        _inCall = true;
+      });
+    } else {
+      print('Permissions denied');
+    }
   }
 
   @override
@@ -91,7 +103,9 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Container(
               color: Colors.black,
               child: _remoteRenderer.srcObject != null
-                  ? RTCVideoView(_remoteRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
+                  ? RTCVideoView(_remoteRenderer,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
                   : const Center(
                       child: Text(
                         'Waiting for partner...',
@@ -114,7 +128,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 border: Border.all(color: Colors.white24),
               ),
               clipBehavior: Clip.antiAlias,
-              child: RTCVideoView(_localRenderer, mirror: true, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+              child: RTCVideoView(_localRenderer,
+                  mirror: true,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
             ),
           ),
 
@@ -126,13 +142,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.yellow,
                   foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                  textStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+                  textStyle: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 child: const Text('JOIN CHAT'),
               ),
             ),
-          
+
           if (_inCall)
             Positioned(
               bottom: 40,
@@ -154,7 +172,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           _inCall = false;
                         });
                       },
-                      icon: const Icon(Icons.call_end, color: Colors.red, size: 40),
+                      icon: const Icon(Icons.call_end,
+                          color: Colors.red, size: 40),
                     ),
                   ],
                 ),
