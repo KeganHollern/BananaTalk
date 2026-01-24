@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/api/idtoken"
 )
 
 var upgrader = websocket.Upgrader{
@@ -53,6 +56,41 @@ func main() {
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	// 1. Extract Token from Query Param
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		// Fallback to Bearer header if needed, but Query is easier for WS
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+	}
+
+	if token == "" {
+		http.Error(w, "Missing authentication token", http.StatusUnauthorized)
+		slog.Warn("Connection attempt without token", "remote_addr", r.RemoteAddr)
+		return
+	}
+
+	// 2. Verify Token
+	ctx := context.Background()
+	// validating for any audience for now, as we might have multiple client IDs (iOS, Web, Android)
+	// Passing empty string as audience skips audience check, which we can refine later if needed.
+	payload, err := idtoken.Validate(ctx, token, "")
+	if err != nil {
+		slog.Error("Token validation failed", "error", err, "remote_addr", r.RemoteAddr)
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// 3. Extract Unique User ID (sub)
+	userID := payload.Subject
+	if userID == "" {
+		slog.Error("Token payload missing subject", "remote_addr", r.RemoteAddr)
+		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
@@ -60,15 +98,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// For Phase 1, we'll just use the RemoteAddr as a simple ID
-	clientID := conn.RemoteAddr().String()
+	clientID := userID
 	client := &Client{ID: clientID, Conn: conn}
 
 	clientsMu.Lock()
 	clients[clientID] = client
 	clientsMu.Unlock()
 
-	slog.Info("Client connected", "client_id", clientID)
+	slog.Info("Client connected (Authenticated)", "client_id", clientID)
 
 	// Send ID to client
 	client.Conn.WriteJSON(Message{
@@ -102,6 +139,14 @@ func matchingLoop() {
 	for {
 		c1 := <-matchQueue
 		c2 := <-matchQueue
+
+		// Prevent matching with self (edge case if user connects twice)
+		if c1.ID == c2.ID {
+			slog.Info("Skipping self-match", "client_id", c1.ID)
+			// Put one back and retry
+			matchQueue <- c1
+			continue
+		}
 
 		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
 

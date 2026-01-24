@@ -1,12 +1,14 @@
 import 'dart:convert';
+
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-typedef void OnLocalStream(MediaStream stream);
-typedef void OnRemoteStream(MediaStream stream);
+typedef OnLocalStream = void Function(MediaStream stream);
+typedef OnRemoteStream = void Function(MediaStream stream);
 
 class Signaling {
   final String serverUrl;
+  final String token; // Add token field
   WebSocketChannel? _channel;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
@@ -17,10 +19,12 @@ class Signaling {
   String? _selfId;
   String? _remoteId;
 
-  Signaling(this.serverUrl);
+  Signaling(this.serverUrl, this.token); // Update constructor
 
   Future<void> connect() async {
-    _channel = WebSocketChannel.connect(Uri.parse(serverUrl));
+    // Append token to URL
+    final urlWithToken = '$serverUrl?token=$token';
+    _channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
     
     _channel!.stream.listen((message) {
       _handleMessage(jsonDecode(message));
