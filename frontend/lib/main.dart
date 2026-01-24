@@ -191,8 +191,8 @@ class _ChatScreenState extends State<ChatScreen> {
 }
 
 // android client id
-const String androidClientId =
-    '774973448609-6ot4n6nh0e73trf5fqo8c9gq7jaravvr.apps.googleusercontent.com';
+const String webClientId =
+    '774973448609-nio4jsbacsm16irumk21v66js92d8j2e.apps.googleusercontent.com';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -215,7 +215,7 @@ class _LoginScreenState extends State<LoginScreen> {
       // Must initialize first
       if (Platform.isAndroid) {
         await GoogleSignIn.instance.initialize(
-          serverClientId: androidClientId,
+          serverClientId: webClientId,
         );
       } else {
         await GoogleSignIn.instance.initialize();
