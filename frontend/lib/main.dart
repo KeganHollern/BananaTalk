@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'signaling.dart';
@@ -20,7 +23,7 @@ class MyApp extends StatelessWidget {
         primarySwatch: Colors.yellow,
         useMaterial3: true,
       ),
-      home: const ChatScreen(),
+      home: const LoginScreen(),
     );
   }
 }
@@ -33,14 +36,15 @@ const String serverUrl = 'wss://bt.lystic.dev/ws';
 // ---------------------
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  final String token;
+  const ChatScreen({super.key, required this.token});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  final Signaling _signaling = Signaling(serverUrl);
+  late final Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   bool _inCall = false;
@@ -48,6 +52,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _signaling = Signaling(serverUrl, widget.token);
     initRenderers();
 
     _signaling.onLocalStream = (stream) {
@@ -179,6 +184,127 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+// android client id
+const String webClientId =
+    '774973448609-nio4jsbacsm16irumk21v66js92d8j2e.apps.googleusercontent.com';
+
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _initAndCheckSignIn();
+  }
+
+  Future<void> _initAndCheckSignIn() async {
+    try {
+      // Must initialize first
+      if (Platform.isAndroid) {
+        await GoogleSignIn.instance.initialize(
+          serverClientId: webClientId,
+        );
+      } else {
+        await GoogleSignIn.instance.initialize();
+      }
+
+      var account =
+          await GoogleSignIn.instance.attemptLightweightAuthentication();
+      if (account != null) {
+        _handleSignIn(account);
+      } else {
+        setState(() {
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      print('Silent sign in error: $e');
+      setState(() {
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _handleSignIn(GoogleSignInAccount account) async {
+    try {
+      final auth = account.authentication;
+      final idToken = auth.idToken;
+
+      if (idToken != null) {
+        if (!mounted) return;
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => ChatScreen(token: idToken),
+          ),
+        );
+      } else {
+        // Handle missing token...
+        print('ID Token is null');
+        setState(() {
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      print('Auth details error: $e');
+      setState(() {
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _signIn() async {
+    try {
+      var account = await GoogleSignIn.instance.authenticate();
+      _handleSignIn(account);
+    } catch (e) {
+      print('Sign in error: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('BananaTalk Login')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              'Welcome to BananaTalk',
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton.icon(
+              onPressed: _signIn,
+              icon: const Icon(Icons.login),
+              label: const Text('Sign in with Google'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

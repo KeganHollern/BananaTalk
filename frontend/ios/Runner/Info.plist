@@ -49,5 +49,22 @@
 	<string>BananaTalk needs camera access for video chat.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>BananaTalk needs microphone access for audio chat.</string>
+	<!-- start google sign in section -->
+	<key>GIDClientID</key>
+	<string>774973448609-7r296tcls5fvmli572m6irj3u9anl89f.apps.googleusercontent.com</string>
+	<key>GIDServerClientID</key>
+	<string>774973448609-nio4jsbacsm16irumk21v66js92d8j2e.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.774973448609-7r296tcls5fvmli572m6irj3u9anl89f</string>
+			</array>
+		</dict>
+	</array>
+	<!-- end google sign in section -->
 </dict>
 </plist>
