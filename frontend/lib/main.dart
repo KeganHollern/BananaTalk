@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -188,6 +190,10 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
+// android client id
+const String androidClientId =
+    '774973448609-6ot4n6nh0e73trf5fqo8c9gq7jaravvr.apps.googleusercontent.com';
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -207,7 +213,13 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _initAndCheckSignIn() async {
     try {
       // Must initialize first
-      await GoogleSignIn.instance.initialize();
+      if (Platform.isAndroid) {
+        await GoogleSignIn.instance.initialize(
+          serverClientId: androidClientId,
+        );
+      } else {
+        await GoogleSignIn.instance.initialize();
+      }
 
       var account =
           await GoogleSignIn.instance.attemptLightweightAuthentication();
