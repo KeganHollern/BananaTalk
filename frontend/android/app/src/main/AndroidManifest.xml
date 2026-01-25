@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application
-        android:label="banana_talk"
+        android:label="BananaTalk"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
