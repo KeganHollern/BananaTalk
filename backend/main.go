@@ -136,30 +136,73 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func matchingLoop() {
+	var pending *Client
 	for {
-		c1 := <-matchQueue
-		c2 := <-matchQueue
+		client := <-matchQueue
 
-		// Prevent matching with self (edge case if user connects twice)
-		if c1.ID == c2.ID {
-			slog.Info("Skipping self-match", "client_id", c1.ID)
-			// Put one back and retry
-			matchQueue <- c1
+		// Check if the popped client is still connected
+		if !isClientActive(client) {
+			slog.Info("Skipping disconnected client", "client_id", client.ID)
 			continue
 		}
+
+		if pending == nil {
+			pending = client
+			continue
+		}
+
+		// We have a pending client. Check if they are STILL connected.
+		// (They might have disconnected while we waited for the second client)
+		if !isClientActive(pending) {
+			slog.Info("Pending client disconnected, replacing with new client", "old_pending", pending.ID, "new_pending", client.ID)
+			pending = client
+			continue
+		}
+
+		// Prevent matching with self
+		if pending.ID == client.ID {
+			slog.Info("Skipping self-match", "client_id", client.ID)
+			continue
+		}
+
+		c1 := pending
+		c2 := client
 
 		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
 
 		// Notify both clients they are matched
-		c1.Conn.WriteJSON(Message{
+		err1 := c1.Conn.WriteJSON(Message{
 			Type:    "match",
 			Payload: c2.ID,
 		})
-		c2.Conn.WriteJSON(Message{
+		if err1 != nil {
+			slog.Error("Failed to send match to pending client", "client_id", c1.ID, "error", err1)
+			// c1 is dead. c2 should be the new pending.
+			pending = c2
+			continue
+		}
+
+		err2 := c2.Conn.WriteJSON(Message{
 			Type:    "match",
 			Payload: c1.ID,
 		})
+		if err2 != nil {
+			slog.Error("Failed to send match to new client", "client_id", c2.ID, "error", err2)
+			// c2 is dead. c1 thinks it matched with c2, but c2 won't respond.
+			// Ideally we might tell c1 "nevermind", but for now just log it.
+			// c1 will likely timeout or disconnect.
+		}
+
+		// Reset pending
+		pending = nil
 	}
+}
+
+func isClientActive(c *Client) bool {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	activeClient, ok := clients[c.ID]
+	return ok && activeClient == c
 }
 
 func handleMessage(msg Message) {
