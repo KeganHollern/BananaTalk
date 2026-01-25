@@ -171,14 +171,27 @@ func matchingLoop() {
 		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
 
 		// Notify both clients they are matched
-		c1.Conn.WriteJSON(Message{
+		err1 := c1.Conn.WriteJSON(Message{
 			Type:    "match",
 			Payload: c2.ID,
 		})
-		c2.Conn.WriteJSON(Message{
+		if err1 != nil {
+			slog.Error("Failed to send match to pending client", "client_id", c1.ID, "error", err1)
+			// c1 is dead. c2 should be the new pending.
+			pending = c2
+			continue
+		}
+
+		err2 := c2.Conn.WriteJSON(Message{
 			Type:    "match",
 			Payload: c1.ID,
 		})
+		if err2 != nil {
+			slog.Error("Failed to send match to new client", "client_id", c2.ID, "error", err2)
+			// c2 is dead. c1 thinks it matched with c2, but c2 won't respond.
+			// Ideally we might tell c1 "nevermind", but for now just log it.
+			// c1 will likely timeout or disconnect.
+		}
 
 		// Reset pending
 		pending = nil

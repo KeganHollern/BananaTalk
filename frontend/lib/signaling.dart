@@ -12,10 +12,10 @@ class Signaling {
   WebSocketChannel? _channel;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
-  
+
   OnLocalStream? onLocalStream;
   OnRemoteStream? onRemoteStream;
-  
+
   String? _selfId;
   String? _remoteId;
 
@@ -25,7 +25,7 @@ class Signaling {
     // Append token to URL
     final urlWithToken = '$serverUrl?token=$token';
     _channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
-    
+
     _channel!.stream.listen((message) {
       _handleMessage(jsonDecode(message));
     });
@@ -43,7 +43,13 @@ class Signaling {
       case 'match':
         _remoteId = payload;
         print('Matched with: $_remoteId');
-        _createOffer();
+        // Prevent Glare: Only the "polite" peer (e.g. lower ID) creates the offer.
+        if (_selfId!.compareTo(_remoteId!) < 0) {
+          print('I am the offerer');
+          _createOffer();
+        } else {
+          print('I am the answerer, waiting for offer...');
+        }
         break;
       case 'offer':
         _handleOffer(msg['from'], payload);
@@ -71,7 +77,7 @@ class Signaling {
 
   Future<void> _createOffer() async {
     _peerConnection = await _createPeerConnection();
-    
+
     RTCSessionDescription offer = await _peerConnection!.createOffer();
     await _peerConnection!.setLocalDescription(offer);
 
@@ -81,7 +87,7 @@ class Signaling {
   Future<void> _handleOffer(String from, dynamic payload) async {
     _remoteId = from;
     _peerConnection = await _createPeerConnection();
-    
+
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(payload['sdp'], payload['type']),
     );
@@ -124,11 +130,14 @@ class Signaling {
     });
 
     pc.onIceCandidate = (RTCIceCandidate candidate) {
-      _send('ice_candidate', {
-        'candidate': candidate.candidate,
-        'sdpMid': candidate.sdpMid,
-        'sdpMLineIndex': candidate.sdpMLineIndex,
-      }, to: _remoteId);
+      _send(
+          'ice_candidate',
+          {
+            'candidate': candidate.candidate,
+            'sdpMid': candidate.sdpMid,
+            'sdpMLineIndex': candidate.sdpMLineIndex,
+          },
+          to: _remoteId);
     };
 
     pc.onTrack = (RTCTrackEvent event) {
