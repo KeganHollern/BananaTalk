@@ -15,6 +15,7 @@ class Signaling {
 
   OnLocalStream? onLocalStream;
   OnRemoteStream? onRemoteStream;
+  void Function()? onCallEnded;
 
   String? _selfId;
   String? _remoteId;
@@ -60,7 +61,17 @@ class Signaling {
       case 'ice_candidate':
         _handleIceCandidate(payload);
         break;
+      case 'bye':
+        if (_inCall()) {
+          print('Peer disconnected');
+          onCallEnded?.call();
+        }
+        break;
     }
+  }
+
+  bool _inCall() {
+    return _peerConnection != null;
   }
 
   Future<void> openUserMedia() async {
@@ -146,6 +157,14 @@ class Signaling {
       }
     };
 
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      print('Connection state change: $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        onCallEnded?.call();
+      }
+    };
+
     return pc;
   }
 
@@ -155,6 +174,10 @@ class Signaling {
       'payload': payload,
       'to': to,
     }));
+  }
+
+  void sendBye() {
+    _send('bye', {}, to: _remoteId);
   }
 
   void dispose() {

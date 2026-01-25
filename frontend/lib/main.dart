@@ -64,6 +64,18 @@ class _ChatScreenState extends State<ChatScreen> {
       _remoteRenderer.srcObject = stream;
       setState(() {});
     };
+
+    _signaling.onCallEnded = () {
+      if (!mounted) return;
+      _signaling.dispose();
+      setState(() {
+        _inCall = false;
+        _remoteRenderer.srcObject = null;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Call ended')),
+      );
+    };
   }
 
   Future<void> initRenderers() async {
@@ -181,10 +193,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     const SizedBox(height: 20),
                     IconButton(
                       onPressed: () {
-                        // For Phase 1, we just close everything
+                        _signaling.sendBye();
                         _signaling.dispose();
                         setState(() {
                           _inCall = false;
+                          _remoteRenderer.srcObject = null;
                         });
                       },
                       icon: const Icon(Icons.call_end,
