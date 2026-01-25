@@ -27,6 +27,14 @@
       "deviceId": "58101FDCH000BC"
     },
     {
+      "name": "Flutter (Pixel 8)",
+      "type": "dart",
+      "request": "launch",
+      "program": "${workspaceFolder}/frontend/lib/main.dart",
+      "cwd": "${workspaceFolder}/frontend",
+      "deviceId": "39090DLJH002RY"
+    },
+    {
       "name": "Flutter (iOS Simulator)",
       "type": "dart",
       "request": "launch",

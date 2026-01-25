@@ -80,6 +80,17 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _join() async {
+    // on macOS, permissions are handled by the OS and flutter_webrtc automatically.
+    // permission_handler doesn't need to be used and causes MissingPluginException
+    if (Platform.isMacOS) {
+      await _signaling.openUserMedia();
+      await _signaling.connect();
+      setState(() {
+        _inCall = true;
+      });
+      return;
+    }
+
     Map<Permission, PermissionStatus> statuses = await [
       Permission.camera,
       Permission.microphone,
