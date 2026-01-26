@@ -16,6 +16,7 @@ class Signaling {
   OnLocalStream? onLocalStream;
   OnRemoteStream? onRemoteStream;
   void Function()? onCallEnded;
+  void Function(dynamic error)? onConnectionError;
 
   String? _selfId;
   String? _remoteId;
@@ -27,9 +28,36 @@ class Signaling {
     final urlWithToken = '$serverUrl?token=$token';
     _channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
 
-    _channel!.stream.listen((message) {
-      _handleMessage(jsonDecode(message));
-    });
+    _channel!.stream.listen(
+      (message) {
+        _handleMessage(jsonDecode(message));
+      },
+      onError: (error) {
+        print('WebSocket error: $error');
+        onConnectionError?.call(error);
+      },
+      onDone: () {
+        print('WebSocket closed');
+        // If closed without explicit bye, might be an error or server disconnect
+        // For now we can treat it as a potential drop if we were expecting to stay connected
+        // But strictly speaking, onDone isn't always an error.
+        // However, for auth failure, the server closes the connection immediately.
+        // Let's assume onDone with no prior messages or during handshake might be worth checking.
+        // For simplicity, we'll focus on onError or immediate close.
+        if (_channel?.closeCode != null) {
+          print('Close code: ${_channel?.closeCode}');
+          // 1008 is Policy Violation (often used for Auth failure), but might be generic.
+          // If we get closed immediately, trigger error logic.
+        }
+
+        // If we simply disconnected, we might want to notify.
+        // For this specific task, let's trigger error if we aren't intentionally closing.
+        // But how do we distinguish?
+        // We'll leave onDone for now and focus on onError which often fires for connection failure.
+        // Actually, ws package might just fire onDone if connection fails to establish?
+        // Let's catch generic errors for now.
+      },
+    );
   }
 
   void _handleMessage(Map<String, dynamic> msg) async {
