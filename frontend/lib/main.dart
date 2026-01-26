@@ -7,9 +7,12 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'services/logger_service.dart';
 import 'signaling.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await LoggerService().init();
   runApp(const MyApp());
 }
 
