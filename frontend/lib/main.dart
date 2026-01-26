@@ -7,9 +7,12 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'services/logger_service.dart';
 import 'signaling.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await LoggerService().init();
   runApp(const MyApp());
 }
 
@@ -62,7 +65,8 @@ class _ChatScreenState extends State<ChatScreen> {
     _signaling = Signaling(serverUrl, token);
 
     _signaling.onConnectionError = (error) {
-      print('Connection error: $error');
+      LoggerService().logError(
+          'ChatScreen', 'Connection error', error, StackTrace.current);
       // Reset UI to "Join" state immediately
       _signaling.onCallEnded?.call();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -131,7 +135,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _inCall = true;
       });
     } else {
-      print('Permissions denied');
+      LoggerService().logInfo('ChatScreen', 'Permissions denied');
     }
   }
 
@@ -201,8 +205,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       await storage.delete(key: 'auth_token');
                       try {
                         await GoogleSignIn.instance.signOut();
-                      } catch (e) {
-                        print('Sign out error: $e');
+                      } catch (e, stack) {
+                        LoggerService()
+                            .logError('ChatScreen', 'Sign out error', e, stack);
                       }
 
                       if (context.mounted) {
@@ -284,11 +289,13 @@ class _LoginScreenState extends State<LoginScreen> {
       if (cachedToken != null) {
         bool isExpired = JwtDecoder.isExpired(cachedToken);
         if (isExpired) {
-          print('Cached token expired, clearing...');
+          LoggerService()
+              .logInfo('LoginScreen', 'Cached token expired, clearing...');
           await _storage.delete(key: 'auth_token');
           cachedToken = null;
         } else {
-          print('Found cached token, skipping Google Sign-In init');
+          LoggerService().logInfo('LoginScreen',
+              'Found cached token, skipping Google Sign-In init');
           _navigateToChat(cachedToken);
           return;
         }
@@ -313,8 +320,8 @@ class _LoginScreenState extends State<LoginScreen> {
           _loading = false;
         });
       }
-    } catch (e) {
-      print('Silent sign in error: $e');
+    } catch (e, stack) {
+      LoggerService().logError('LoginScreen', 'Silent sign in error', e, stack);
       setState(() {
         _loading = false;
       });
@@ -340,13 +347,14 @@ class _LoginScreenState extends State<LoginScreen> {
         _navigateToChat(idToken);
       } else {
         // Handle missing token...
-        print('ID Token is null');
+        LoggerService().logError(
+            'LoginScreen', 'ID Token is null', null, StackTrace.current);
         setState(() {
           _loading = false;
         });
       }
-    } catch (e) {
-      print('Auth details error: $e');
+    } catch (e, stack) {
+      LoggerService().logError('LoginScreen', 'Auth details error', e, stack);
       setState(() {
         _loading = false;
       });
@@ -357,8 +365,8 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       var account = await GoogleSignIn.instance.authenticate();
       _handleSignIn(account);
-    } catch (e) {
-      print('Sign in error: $e');
+    } catch (e, stack) {
+      LoggerService().logError('LoginScreen', 'Sign in error', e, stack);
     }
   }
 

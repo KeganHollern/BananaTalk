@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'services/logger_service.dart';
+
 typedef OnLocalStream = void Function(MediaStream stream);
 typedef OnRemoteStream = void Function(MediaStream stream);
 
@@ -33,11 +35,12 @@ class Signaling {
         _handleMessage(jsonDecode(message));
       },
       onError: (error) {
-        print('WebSocket error: $error');
+        LoggerService().logError(
+            'Signaling', 'WebSocket error', error, StackTrace.current);
         onConnectionError?.call(error);
       },
       onDone: () {
-        print('WebSocket closed');
+        LoggerService().logInfo('Signaling', 'WebSocket closed');
         onCallEnded?.call();
       },
     );
@@ -50,17 +53,18 @@ class Signaling {
     switch (type) {
       case 'init':
         _selfId = payload;
-        print('My ID: $_selfId');
+        LoggerService().logInfo('Signaling', 'My ID: $_selfId');
         break;
       case 'match':
         _remoteId = payload;
-        print('Matched with: $_remoteId');
+        LoggerService().logInfo('Signaling', 'Matched with: $_remoteId');
         // Prevent Glare: Only the "polite" peer (e.g. lower ID) creates the offer.
         if (_selfId!.compareTo(_remoteId!) < 0) {
-          print('I am the offerer');
+          LoggerService().logInfo('Signaling', 'I am the offerer');
           _createOffer();
         } else {
-          print('I am the answerer, waiting for offer...');
+          LoggerService()
+              .logInfo('Signaling', 'I am the answerer, waiting for offer...');
         }
         break;
       case 'offer':
@@ -74,7 +78,7 @@ class Signaling {
         break;
       case 'bye':
         if (_inCall()) {
-          print('Peer disconnected');
+          LoggerService().logInfo('Signaling', 'Peer disconnected');
           onCallEnded?.call();
         }
         break;
@@ -169,7 +173,7 @@ class Signaling {
     };
 
     pc.onConnectionState = (RTCPeerConnectionState state) {
-      print('Connection state change: $state');
+      LoggerService().logInfo('Signaling', 'Connection state change: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
           state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         onCallEnded?.call();
