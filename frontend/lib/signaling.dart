@@ -16,6 +16,7 @@ class Signaling {
   OnLocalStream? onLocalStream;
   OnRemoteStream? onRemoteStream;
   void Function()? onCallEnded;
+  void Function(dynamic error)? onConnectionError;
 
   String? _selfId;
   String? _remoteId;
@@ -27,9 +28,19 @@ class Signaling {
     final urlWithToken = '$serverUrl?token=$token';
     _channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
 
-    _channel!.stream.listen((message) {
-      _handleMessage(jsonDecode(message));
-    });
+    _channel!.stream.listen(
+      (message) {
+        _handleMessage(jsonDecode(message));
+      },
+      onError: (error) {
+        print('WebSocket error: $error');
+        onConnectionError?.call(error);
+      },
+      onDone: () {
+        print('WebSocket closed');
+        onCallEnded?.call();
+      },
+    );
   }
 
   void _handleMessage(Map<String, dynamic> msg) async {

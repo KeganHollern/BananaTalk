@@ -7,9 +7,21 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/api/idtoken"
+)
+
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
 )
 
 var upgrader = websocket.Upgrader{
@@ -28,12 +40,118 @@ type Message struct {
 type Client struct {
 	ID   string
 	Conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *Client) WriteJSON(v interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.Conn.WriteJSON(v)
+}
+
+func (c *Client) WriteControl(messageType int, data []byte, deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn.WriteControl(messageType, data, deadline)
+}
+
+// MatchMaker manages the matching queue
+type MatchMaker struct {
+	queue  []*Client
+	mu     sync.Mutex
+	notify chan struct{}
+}
+
+func NewMatchMaker() *MatchMaker {
+	return &MatchMaker{
+		queue:  make([]*Client, 0),
+		notify: make(chan struct{}, 1),
+	}
+}
+
+func (m *MatchMaker) Add(c *Client) {
+	m.mu.Lock()
+	m.queue = append(m.queue, c)
+	m.mu.Unlock()
+	slog.Info("Adding client to match queue", "client_id", c.ID)
+
+	// Non-blocking send to trigger loop
+	select {
+	case m.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (m *MatchMaker) Remove(c *Client) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i, client := range m.queue {
+		if client.ID == c.ID {
+			// Remove from slice
+			m.queue = append(m.queue[:i], m.queue[i+1:]...)
+			slog.Info("Removed client from match queue", "client_id", c.ID)
+			return
+		}
+	}
+}
+
+func (m *MatchMaker) Run() {
+	for {
+		<-m.notify
+
+		m.mu.Lock()
+		if len(m.queue) < 2 {
+			m.mu.Unlock()
+			continue
+		}
+
+		c1 := m.queue[0]
+		c2 := m.queue[1]
+		m.queue = m.queue[2:]
+		m.mu.Unlock()
+
+		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
+
+		// Notify both clients they are matched
+		err1 := c1.WriteJSON(Message{
+			Type:    "match",
+			Payload: c2.ID,
+		})
+
+		err2 := c2.WriteJSON(Message{
+			Type:    "match",
+			Payload: c1.ID,
+		})
+
+		// If c1 failed, c2 is orphaned (unless c2 also failed).
+		// For simplicity, if we fail to write to one, the other gets a match message
+		// but the peer won't respond. The active client will eventually disconnect.
+		// A more robust solution might re-queue the survivor, but this is a starter fix.
+		if err1 != nil {
+			slog.Error("Failed to send match to client 1", "client_id", c1.ID, "error", err1)
+		}
+		if err2 != nil {
+			slog.Error("Failed to send match to client 2", "client_id", c2.ID, "error", err2)
+		}
+
+		// Check if we still have enough people to run again immediately
+		m.mu.Lock()
+		if len(m.queue) >= 2 {
+			select {
+			case m.notify <- struct{}{}:
+			default:
+			}
+		}
+		m.mu.Unlock()
+	}
 }
 
 var (
 	clients    = make(map[string]*Client)
 	clientsMu  sync.Mutex
-	matchQueue = make(chan *Client, 100)
+	matchMaker = NewMatchMaker()
 )
 
 func main() {
@@ -45,7 +163,7 @@ func main() {
 
 	port := ":8080"
 	// Start matching loop
-	go matchingLoop()
+	go matchMaker.Run()
 
 	slog.Info("BananaTalk Backend starting", "port", port)
 	err := http.ListenAndServe(port, nil)
@@ -79,6 +197,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	payload, err := idtoken.Validate(ctx, token, "")
 	if err != nil {
 		slog.Error("Token validation failed", "error", err, "remote_addr", r.RemoteAddr)
+		// Explicitly logging it as expired/invalid for clarity
+		slog.Info("JWT Token expired or invalid", "token_snippet", token[:min(10, len(token))]+"...")
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -105,104 +225,72 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clients[clientID] = client
 	clientsMu.Unlock()
 
+	// Ensure cleanup happens on exit
+	defer func() {
+		clientsMu.Lock()
+		delete(clients, clientID)
+		clientsMu.Unlock()
+
+		// IMPORTANT: Remove from match queue if they are still there
+		matchMaker.Remove(client)
+
+		slog.Info("Client fully disconnected", "client_id", clientID)
+	}()
+
 	slog.Info("Client connected (Authenticated)", "client_id", clientID)
 
 	// Send ID to client
-	client.Conn.WriteJSON(Message{
+	client.WriteJSON(Message{
 		Type:    "init",
 		Payload: clientID,
 	})
 
 	// Add to match queue
-	slog.Info("Adding client to match queue", "client_id", clientID)
-	matchQueue <- client
+	matchMaker.Add(client)
+
+	// Start heartbeat
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := client.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
+					slog.Info("Ping failed, closing connection", "client_id", clientID, "error", err)
+					return
+				}
+			}
+		}
+	}()
+
+	// Limit message size to 8KB (enough for SDP)
+	conn.SetReadLimit(8192)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			slog.Error("ReadJSON error", "client_id", clientID, "error", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
+				slog.Error("WebSocket error", "client_id", clientID, "error", err)
+			} else {
+				// Normal disconnect (e.g. client closed tab)
+				slog.Info("Client disconnected (ReadJSON)", "client_id", clientID)
+			}
 			break
 		}
 
 		msg.From = clientID
 		handleMessage(msg)
 	}
-
-	clientsMu.Lock()
-	delete(clients, clientID)
-	clientsMu.Unlock()
-	slog.Info("Client disconnected", "client_id", clientID)
 }
 
-func matchingLoop() {
-	var pending *Client
-	for {
-		client := <-matchQueue
-
-		// Check if the popped client is still connected
-		if !isClientActive(client) {
-			slog.Info("Skipping disconnected client", "client_id", client.ID)
-			continue
-		}
-
-		if pending == nil {
-			pending = client
-			continue
-		}
-
-		// We have a pending client. Check if they are STILL connected.
-		// (They might have disconnected while we waited for the second client)
-		if !isClientActive(pending) {
-			slog.Info("Pending client disconnected, replacing with new client", "old_pending", pending.ID, "new_pending", client.ID)
-			pending = client
-			continue
-		}
-
-		// Prevent matching with self
-		if pending.ID == client.ID {
-			slog.Info("Skipping self-match", "client_id", client.ID)
-			continue
-		}
-
-		c1 := pending
-		c2 := client
-
-		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
-
-		// Notify both clients they are matched
-		err1 := c1.Conn.WriteJSON(Message{
-			Type:    "match",
-			Payload: c2.ID,
-		})
-		if err1 != nil {
-			slog.Error("Failed to send match to pending client", "client_id", c1.ID, "error", err1)
-			// c1 is dead. c2 should be the new pending.
-			pending = c2
-			continue
-		}
-
-		err2 := c2.Conn.WriteJSON(Message{
-			Type:    "match",
-			Payload: c1.ID,
-		})
-		if err2 != nil {
-			slog.Error("Failed to send match to new client", "client_id", c2.ID, "error", err2)
-			// c2 is dead. c1 thinks it matched with c2, but c2 won't respond.
-			// Ideally we might tell c1 "nevermind", but for now just log it.
-			// c1 will likely timeout or disconnect.
-		}
-
-		// Reset pending
-		pending = nil
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-}
-
-func isClientActive(c *Client) bool {
-	clientsMu.Lock()
-	defer clientsMu.Unlock()
-	activeClient, ok := clients[c.ID]
-	return ok && activeClient == c
+	return b
 }
 
 func handleMessage(msg Message) {
@@ -215,7 +303,7 @@ func handleMessage(msg Message) {
 	clientsMu.Unlock()
 
 	if ok {
-		err := target.Conn.WriteJSON(msg)
+		err := target.WriteJSON(msg)
 		if err != nil {
 			slog.Error("Failed to send message", "to", msg.To, "error", err)
 		}

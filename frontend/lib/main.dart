@@ -1,8 +1,10 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'signaling.dart';
@@ -44,7 +46,7 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  late final Signaling _signaling;
+  late Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   bool _inCall = false;
@@ -52,8 +54,21 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _signaling = Signaling(serverUrl, widget.token);
+    _connect(widget.token);
     initRenderers();
+  }
+
+  void _connect(String token) {
+    _signaling = Signaling(serverUrl, token);
+
+    _signaling.onConnectionError = (error) {
+      print('Connection error: $error');
+      // Reset UI to "Join" state immediately
+      _signaling.onCallEnded?.call();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connection lost: $error')),
+      );
+    };
 
     _signaling.onLocalStream = (stream) {
       _localRenderer.srcObject = stream;
@@ -164,17 +179,45 @@ class _ChatScreenState extends State<ChatScreen> {
           // UI Overlay
           if (!_inCall)
             Center(
-              child: ElevatedButton(
-                onPressed: _join,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.yellow,
-                  foregroundColor: Colors.black,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                  textStyle: const TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-                child: const Text('JOIN CHAT'),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ElevatedButton(
+                    onPressed: _join,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.yellow,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 40, vertical: 20),
+                      textStyle: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.bold),
+                    ),
+                    child: const Text('JOIN CHAT'),
+                  ),
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: () async {
+                      final storage = FlutterSecureStorage();
+                      await storage.delete(key: 'auth_token');
+                      try {
+                        await GoogleSignIn.instance.signOut();
+                      } catch (e) {
+                        print('Sign out error: $e');
+                      }
+
+                      if (context.mounted) {
+                        Navigator.of(context).pushReplacement(
+                          MaterialPageRoute(
+                            builder: (_) => const LoginScreen(),
+                          ),
+                        );
+                      }
+                    },
+                    style:
+                        TextButton.styleFrom(foregroundColor: Colors.white70),
+                    child: const Text('Sign Out'),
+                  ),
+                ],
               ),
             ),
 
@@ -225,6 +268,7 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
+  final _storage = FlutterSecureStorage();
   bool _loading = true;
 
   @override
@@ -235,7 +279,22 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _initAndCheckSignIn() async {
     try {
-      // Must initialize first
+      // 1. Check local storage first
+      String? cachedToken = await _storage.read(key: 'auth_token');
+      if (cachedToken != null) {
+        bool isExpired = JwtDecoder.isExpired(cachedToken);
+        if (isExpired) {
+          print('Cached token expired, clearing...');
+          await _storage.delete(key: 'auth_token');
+          cachedToken = null;
+        } else {
+          print('Found cached token, skipping Google Sign-In init');
+          _navigateToChat(cachedToken);
+          return;
+        }
+      }
+
+      // 2. Initialize Google Sign-In if no token found
       if (Platform.isAndroid) {
         await GoogleSignIn.instance.initialize(
           serverClientId: webClientId,
@@ -244,6 +303,7 @@ class _LoginScreenState extends State<LoginScreen> {
         await GoogleSignIn.instance.initialize();
       }
 
+      // 3. Try silent sign-in (only if we didn't have a token)
       var account =
           await GoogleSignIn.instance.attemptLightweightAuthentication();
       if (account != null) {
@@ -261,18 +321,23 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  void _navigateToChat(String token) {
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(token: token),
+      ),
+    );
+  }
+
   Future<void> _handleSignIn(GoogleSignInAccount account) async {
     try {
       final auth = account.authentication;
       final idToken = auth.idToken;
 
       if (idToken != null) {
-        if (!mounted) return;
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (_) => ChatScreen(token: idToken),
-          ),
-        );
+        await _storage.write(key: 'auth_token', value: idToken);
+        _navigateToChat(idToken);
       } else {
         // Handle missing token...
         print('ID Token is null');
