@@ -61,8 +61,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _signaling = Signaling(serverUrl, token);
 
     _signaling.onConnectionError = (error) {
-      print('Connection error: $error. Attempting refresh...');
-      _handleConnectionError();
+      print('Connection error: $error');
+      // Reset UI to "Join" state immediately
+      _signaling.onCallEnded?.call();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Connection lost: $error')),
+      );
     };
 
     _signaling.onLocalStream = (stream) {
@@ -86,56 +90,6 @@ class _ChatScreenState extends State<ChatScreen> {
         const SnackBar(content: Text('Call ended')),
       );
     };
-  }
-
-  Future<void> _handleConnectionError() async {
-    try {
-      // Attempt silent refresh
-      final account =
-          await GoogleSignIn.instance.attemptLightweightAuthentication();
-      if (account != null) {
-        final auth = account.authentication;
-        final newToken = auth.idToken;
-        if (newToken != null) {
-          print('Token refreshed successfully. Reconnecting...');
-          // Update storage
-          final storage = FlutterSecureStorage();
-          await storage.write(key: 'auth_token', value: newToken);
-
-          // Reconnect with new token
-          _signaling.dispose();
-          // Slight delay to ensure socket cleanup?
-          _connect(newToken);
-          // If we were trying to join, we might need to retry 'connect' and 'openUserMedia'?
-          // But wait, _connect here just sets up the object.
-          // The actual "Join" button calls _join() which calls _signaling.connect().
-          // If we are ALREADY in a call?
-          // If we are in a call and it drops, the UI state _inCall might still be true?
-          // If the socket drops, we probably want to try to recover the session or just go back to "Join" state.
-          // For simplicity, let's just re-instantiate signaling. Use will have to click "Join" again if they weren't in call.
-          // If they WERE in call, we probably dropped the call.
-        } else {
-          _handleAuthFailure();
-        }
-      } else {
-        _handleAuthFailure();
-      }
-    } catch (e) {
-      print('Refresh failed: $e');
-      _handleAuthFailure();
-    }
-  }
-
-  void _handleAuthFailure() async {
-    print('Auth failure. Redirecting to login.');
-    final storage = FlutterSecureStorage();
-    await storage.delete(key: 'auth_token');
-
-    if (mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-      );
-    }
   }
 
   Future<void> initRenderers() async {
