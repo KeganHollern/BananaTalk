@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'signaling.dart';
@@ -281,9 +282,16 @@ class _LoginScreenState extends State<LoginScreen> {
       // 1. Check local storage first
       String? cachedToken = await _storage.read(key: 'auth_token');
       if (cachedToken != null) {
-        print('Found cached token, skipping Google Sign-In init');
-        _navigateToChat(cachedToken);
-        return;
+        bool isExpired = JwtDecoder.isExpired(cachedToken);
+        if (isExpired) {
+          print('Cached token expired, clearing...');
+          await _storage.delete(key: 'auth_token');
+          cachedToken = null;
+        } else {
+          print('Found cached token, skipping Google Sign-In init');
+          _navigateToChat(cachedToken);
+          return;
+        }
       }
 
       // 2. Initialize Google Sign-In if no token found
