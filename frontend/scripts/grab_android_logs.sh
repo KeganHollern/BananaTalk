@@ -9,9 +9,18 @@ LOCAL_LOG_DIR="local_logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 DEST_DIR="$LOCAL_LOG_DIR/$TIMESTAMP"
 
+# add ~/Library/Android/sdk/platform-tools/ to path for ADB but only for this
+export PATH=$PATH:~/Library/Android/sdk/platform-tools/
+
 # Check for adb
 if ! command -v adb &> /dev/null; then
     echo "Error: adb is not installed or not in PATH."
+    exit 1
+fi
+
+# Check for jq
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed. Please install jq to format logs."
     exit 1
 fi
 
@@ -38,6 +47,20 @@ if [ $? -eq 0 ]; then
     # List files
     echo "Files retrieved:"
     ls -lh "$DEST_DIR"
+
+    # Format logs with jq
+    echo "Formatting logs with jq..."
+    find "$DEST_DIR" -name "*.log" -print0 | while IFS= read -r -d '' file; do
+        temp_file="${file}.tmp"
+        # Use jq to pretty-print and remove unnecessary fields
+        if jq 'del(.user, .organization, .host, .geo, .app)' "$file" > "$temp_file"; then
+            mv "$temp_file" "$file"
+            echo "Formatted: $file"
+        else
+            echo "Warning: Failed to format $file (might not be valid JSON). Keeping original."
+            rm -f "$temp_file"
+        fi
+    done
 else
     echo "Failed to pull logs. Please ensure the app has run and permissions are granted."
     echo "Note: On some Android versions, you may need 'run-as' access or debuggable build."
