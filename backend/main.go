@@ -7,9 +7,21 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/api/idtoken"
+)
+
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 60 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = (pongWait * 9) / 10
 )
 
 var upgrader = websocket.Upgrader{
@@ -28,6 +40,20 @@ type Message struct {
 type Client struct {
 	ID   string
 	Conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *Client) WriteJSON(v interface{}) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.Conn.WriteJSON(v)
+}
+
+func (c *Client) WriteControl(messageType int, data []byte, deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn.WriteControl(messageType, data, deadline)
 }
 
 // MatchMaker manages the matching queue
@@ -89,18 +115,18 @@ func (m *MatchMaker) Run() {
 		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
 
 		// Notify both clients they are matched
-		err1 := c1.Conn.WriteJSON(Message{
+		err1 := c1.WriteJSON(Message{
 			Type:    "match",
 			Payload: c2.ID,
 		})
-		
-		err2 := c2.Conn.WriteJSON(Message{
+
+		err2 := c2.WriteJSON(Message{
 			Type:    "match",
 			Payload: c1.ID,
 		})
 
-		// If c1 failed, c2 is orphaned (unless c2 also failed). 
-		// For simplicity, if we fail to write to one, the other gets a match message 
+		// If c1 failed, c2 is orphaned (unless c2 also failed).
+		// For simplicity, if we fail to write to one, the other gets a match message
 		// but the peer won't respond. The active client will eventually disconnect.
 		// A more robust solution might re-queue the survivor, but this is a starter fix.
 		if err1 != nil {
@@ -204,17 +230,17 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		clientsMu.Lock()
 		delete(clients, clientID)
 		clientsMu.Unlock()
-		
+
 		// IMPORTANT: Remove from match queue if they are still there
 		matchMaker.Remove(client)
-		
+
 		slog.Info("Client fully disconnected", "client_id", clientID)
 	}()
 
 	slog.Info("Client connected (Authenticated)", "client_id", clientID)
 
 	// Send ID to client
-	client.Conn.WriteJSON(Message{
+	client.WriteJSON(Message{
 		Type:    "init",
 		Payload: clientID,
 	})
@@ -222,11 +248,31 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// Add to match queue
 	matchMaker.Add(client)
 
+	// Start heartbeat
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := client.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
+					slog.Info("Ping failed, closing connection", "client_id", clientID, "error", err)
+					return
+				}
+			}
+		}
+	}()
+
+	// Limit message size to 8KB (enough for SDP)
+	conn.SetReadLimit(8192)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+
 	for {
 		var msg Message
 		err := conn.ReadJSON(&msg)
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
 				slog.Error("WebSocket error", "client_id", clientID, "error", err)
 			} else {
 				// Normal disconnect (e.g. client closed tab)
@@ -257,7 +303,7 @@ func handleMessage(msg Message) {
 	clientsMu.Unlock()
 
 	if ok {
-		err := target.Conn.WriteJSON(msg)
+		err := target.WriteJSON(msg)
 		if err != nil {
 			slog.Error("Failed to send message", "to", msg.To, "error", err)
 		}
