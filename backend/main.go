@@ -100,6 +100,20 @@ func main() {
 
 	matchMaker = NewMatchMaker(rdb)
 
+	dbDSN := getEnv("DB_DSN", "")
+	if dbDSN == "" {
+		slog.Error("DB_DSN environment variable is required")
+		os.Exit(1)
+	}
+	var dbErr error
+	db, dbErr = initDB(ctx, dbDSN)
+	if dbErr != nil {
+		slog.Error("PostgreSQL connection failed", "error", dbErr)
+		os.Exit(1)
+	}
+	defer db.Close()
+	slog.Info("Connected to PostgreSQL")
+
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/", handleNotFound)
 
@@ -149,6 +163,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		slog.Error("Token payload missing subject", "remote_addr", r.RemoteAddr)
 		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+		return
+	}
+
+	// 4. Persist user on first login
+	if _, err := upsertUser(ctx, userID); err != nil {
+		slog.Error("Failed to upsert user", "user_id", userID, "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
