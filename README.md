@@ -51,9 +51,31 @@ sudo apt-get install coturn
 sudo systemctl start coturn
 ```
 
+### Backend Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_ADDR` | `localhost:6379` | Redis server address (`host:port`) |
+| `REDIS_PASSWORD` | _(empty)_ | Redis `requirepass` password |
+| `REDIS_DB` | `0` | Redis logical database index |
+
+In Kubernetes these are injected from the `redis-secret` Secret (see `k8s/base/redis-secret.yaml`). Replace the placeholder values before applying:
+
+```bash
+# Edit placeholder values first
+kubectl apply -k k8s/base/
+```
+
+**Secrets with placeholder values that must be changed before deploying:**
+
+| Secret | Key | Used by |
+|---|---|---|
+| `redis-secret` | `redis-password` | Backend (`REDIS_PASSWORD`), Redis (`--requirepass`) |
+| `postgres-secret` | `postgres-password`, `postgres-user`, `postgres-db` | PostgreSQL StatefulSet |
+
 ## Roadmap
 
 - [x] **Phase 1: Walking Skeleton** (Signaling, Matching, Basic P2P)
-- [ ] **Phase 2: Auth & Matching Logic** (Social Auth, Redis queue)
+- [x] **Phase 2: Auth & Matching Logic** (Social Auth, Redis queue)
 - [ ] **Phase 3: Safety & Refinement** (Reporting, Screenshot capture)
 - [ ] **Phase 4: Production** (Load testing, App Store submission)

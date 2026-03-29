@@ -4,6 +4,8 @@ metadata:
   name: bananatalk-backend
   namespace: default
 spec:
+  selector:
+    app: bananatalk-backend
   ports:
     - protocol: TCP
       port: 80

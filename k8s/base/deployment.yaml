@@ -3,20 +3,28 @@ kind: Deployment
 metadata:
   name: bananatalk-backend
   namespace: default
+  labels:
+    app: bananatalk-backend
   annotations:
     keel.sh/policy: force
     keel.sh/trigger: poll
     keel.sh/pollSchedule: "@daily"
     keel.sh/match-tag: "true"
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      app: bananatalk-backend
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 25%
       maxUnavailable: 25%
   template:
+    metadata:
+      labels:
+        app: bananatalk-backend
     spec:
       containers:
         - name: bananatalk-backend
@@ -25,6 +33,14 @@ spec:
           ports:
             - containerPort: 8080
               protocol: TCP
+          env:
+            - name: REDIS_ADDR
+              value: "redis:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
           resources:
             limits:
               cpu: "500m"
