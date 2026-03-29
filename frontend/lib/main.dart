@@ -1,19 +1,21 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'call_state.dart';
 import 'services/logger_service.dart';
 import 'signaling.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await LoggerService().init();
-  runApp(const MyApp());
+  runApp(const ProviderScope(child: MyApp()));
 }
 
 class MyApp extends StatelessWidget {
@@ -40,25 +42,24 @@ class MyApp extends StatelessWidget {
 const String serverUrl = 'wss://bt.lystic.dev/ws';
 // ---------------------
 
-class ChatScreen extends StatefulWidget {
+class ChatScreen extends ConsumerStatefulWidget {
   final String token;
   const ChatScreen({super.key, required this.token});
 
   @override
-  State<ChatScreen> createState() => _ChatScreenState();
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends ConsumerState<ChatScreen> {
   late Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  bool _inCall = false;
 
   @override
   void initState() {
     super.initState();
     _connect(widget.token);
-    initRenderers();
+    _initRenderers();
   }
 
   void _connect(String token) {
@@ -67,37 +68,43 @@ class _ChatScreenState extends State<ChatScreen> {
     _signaling.onConnectionError = (error) {
       LoggerService().logError(
           'ChatScreen', 'Connection error', error, StackTrace.current);
-      // Reset UI to "Join" state immediately
-      _signaling.onCallEnded?.call();
+      if (!mounted) return;
+      ref.read(callProvider.notifier).endCall();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Connection lost: $error')),
       );
     };
 
     _signaling.onLocalStream = (stream) {
-      _localRenderer.srcObject = stream;
-      setState(() {});
+      setState(() {
+        _localRenderer.srcObject = stream;
+      });
     };
 
     _signaling.onRemoteStream = (stream) {
-      _remoteRenderer.srcObject = stream;
-      setState(() {});
+      setState(() {
+        _remoteRenderer.srcObject = stream;
+      });
+      if (mounted) {
+        ref.read(callProvider.notifier).onConnected();
+      }
     };
 
     _signaling.onCallEnded = () {
       if (!mounted) return;
+      if (ref.read(callProvider).state == CallState.idle) return;
       _signaling.dispose();
       setState(() {
-        _inCall = false;
         _remoteRenderer.srcObject = null;
       });
+      ref.read(callProvider.notifier).endCall();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Call ended')),
       );
     };
   }
 
-  Future<void> initRenderers() async {
+  Future<void> _initRenderers() async {
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
   }
@@ -111,18 +118,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _join() async {
-    // on macOS, permissions are handled by the OS and flutter_webrtc automatically.
-    // permission_handler doesn't need to be used and causes MissingPluginException
     if (Platform.isMacOS) {
       await _signaling.openUserMedia();
       await _signaling.connect();
-      setState(() {
-        _inCall = true;
-      });
+      ref.read(callProvider.notifier).startMatching();
       return;
     }
 
-    Map<Permission, PermissionStatus> statuses = await [
+    final statuses = await [
       Permission.camera,
       Permission.microphone,
     ].request();
@@ -131,16 +134,118 @@ class _ChatScreenState extends State<ChatScreen> {
         statuses[Permission.microphone]!.isGranted) {
       await _signaling.openUserMedia();
       await _signaling.connect();
-      setState(() {
-        _inCall = true;
-      });
+      ref.read(callProvider.notifier).startMatching();
     } else {
       LoggerService().logInfo('ChatScreen', 'Permissions denied');
     }
   }
 
+  void _endCall() {
+    _signaling.sendBye();
+    _signaling.dispose();
+    setState(() {
+      _remoteRenderer.srcObject = null;
+    });
+    ref.read(callProvider.notifier).endCall();
+  }
+
+  Future<void> _signOut() async {
+    const storage = FlutterSecureStorage();
+    await storage.delete(key: 'auth_token');
+    try {
+      await GoogleSignIn.instance.signOut();
+    } catch (e, stack) {
+      LoggerService().logError('ChatScreen', 'Sign out error', e, stack);
+    }
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+    );
+  }
+
+  /// Returns content shown in the black background area when no remote stream.
+  Widget _buildBackgroundContent(CallState state) {
+    return switch (state) {
+      CallState.idle => const Text(
+          'Waiting for partner...',
+          style: TextStyle(color: Colors.white54),
+        ),
+      CallState.matching => const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.yellow),
+            SizedBox(height: 16),
+            Text(
+              'Finding a partner...',
+              style: TextStyle(color: Colors.white54),
+            ),
+          ],
+        ),
+      CallState.connected => const SizedBox.shrink(),
+      CallState.reporting => const Text(
+          'Submitting report...',
+          style: TextStyle(color: Colors.white54),
+        ),
+    };
+  }
+
+  /// Returns the foreground overlay widget driven entirely by [CallState].
+  Widget _buildOverlay(CallState state) {
+    return switch (state) {
+      CallState.idle => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ElevatedButton(
+                onPressed: _join,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.yellow,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 40, vertical: 20),
+                  textStyle: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+                child: const Text('JOIN CHAT'),
+              ),
+              const SizedBox(height: 20),
+              TextButton(
+                onPressed: _signOut,
+                style: TextButton.styleFrom(foregroundColor: Colors.white70),
+                child: const Text('Sign Out'),
+              ),
+            ],
+          ),
+        ),
+      CallState.matching => const SizedBox.shrink(),
+      CallState.connected => Positioned(
+          bottom: 40,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Column(
+              children: [
+                const Text(
+                  'Connected',
+                  style: TextStyle(color: Colors.white, fontSize: 18),
+                ),
+                const SizedBox(height: 20),
+                IconButton(
+                  onPressed: _endCall,
+                  icon: const Icon(Icons.call_end, color: Colors.red, size: 40),
+                ),
+              ],
+            ),
+          ),
+        ),
+      CallState.reporting => const SizedBox.shrink(),
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
+    final callStatus = ref.watch(callProvider);
+
     return Scaffold(
       body: Stack(
         children: [
@@ -149,14 +254,13 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Container(
               color: Colors.black,
               child: _remoteRenderer.srcObject != null
-                  ? RTCVideoView(_remoteRenderer,
+                  ? RTCVideoView(
+                      _remoteRenderer,
                       objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
-                  : const Center(
-                      child: Text(
-                        'Waiting for partner...',
-                        style: TextStyle(color: Colors.white54),
-                      ),
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    )
+                  : Center(
+                      child: _buildBackgroundContent(callStatus.state),
                     ),
             ),
           ),
@@ -174,87 +278,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 border: Border.all(color: Colors.white24),
               ),
               clipBehavior: Clip.antiAlias,
-              child: RTCVideoView(_localRenderer,
-                  mirror: true,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+              child: RTCVideoView(
+                _localRenderer,
+                mirror: true,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              ),
             ),
           ),
 
-          // UI Overlay
-          if (!_inCall)
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ElevatedButton(
-                    onPressed: _join,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.yellow,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 40, vertical: 20),
-                      textStyle: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    child: const Text('JOIN CHAT'),
-                  ),
-                  const SizedBox(height: 20),
-                  TextButton(
-                    onPressed: () async {
-                      final storage = FlutterSecureStorage();
-                      await storage.delete(key: 'auth_token');
-                      try {
-                        await GoogleSignIn.instance.signOut();
-                      } catch (e, stack) {
-                        LoggerService()
-                            .logError('ChatScreen', 'Sign out error', e, stack);
-                      }
-
-                      if (context.mounted) {
-                        Navigator.of(context).pushReplacement(
-                          MaterialPageRoute(
-                            builder: (_) => const LoginScreen(),
-                          ),
-                        );
-                      }
-                    },
-                    style:
-                        TextButton.styleFrom(foregroundColor: Colors.white70),
-                    child: const Text('Sign Out'),
-                  ),
-                ],
-              ),
-            ),
-
-          if (_inCall)
-            Positioned(
-              bottom: 40,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Column(
-                  children: [
-                    const Text(
-                      'Connected',
-                      style: TextStyle(color: Colors.white, fontSize: 18),
-                    ),
-                    const SizedBox(height: 20),
-                    IconButton(
-                      onPressed: () {
-                        _signaling.sendBye();
-                        _signaling.dispose();
-                        setState(() {
-                          _inCall = false;
-                          _remoteRenderer.srcObject = null;
-                        });
-                      },
-                      icon: const Icon(Icons.call_end,
-                          color: Colors.red, size: 40),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          // UI Overlay — state-driven, no ad-hoc boolean flags
+          _buildOverlay(callStatus.state),
         ],
       ),
     );
@@ -273,7 +306,7 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _storage = FlutterSecureStorage();
+  final _storage = const FlutterSecureStorage();
   bool _loading = true;
 
   @override
