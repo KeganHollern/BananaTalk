@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/api/idtoken"
 )
 
@@ -56,114 +58,51 @@ func (c *Client) WriteControl(messageType int, data []byte, deadline time.Time) 
 	return c.Conn.WriteControl(messageType, data, deadline)
 }
 
-// MatchMaker manages the matching queue
-type MatchMaker struct {
-	queue  []*Client
-	mu     sync.Mutex
-	notify chan struct{}
-}
-
-func NewMatchMaker() *MatchMaker {
-	return &MatchMaker{
-		queue:  make([]*Client, 0),
-		notify: make(chan struct{}, 1),
-	}
-}
-
-func (m *MatchMaker) Add(c *Client) {
-	m.mu.Lock()
-	m.queue = append(m.queue, c)
-	m.mu.Unlock()
-	slog.Info("Adding client to match queue", "client_id", c.ID)
-
-	// Non-blocking send to trigger loop
-	select {
-	case m.notify <- struct{}{}:
-	default:
-	}
-}
-
-func (m *MatchMaker) Remove(c *Client) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for i, client := range m.queue {
-		if client.ID == c.ID {
-			// Remove from slice
-			m.queue = append(m.queue[:i], m.queue[i+1:]...)
-			slog.Info("Removed client from match queue", "client_id", c.ID)
-			return
-		}
-	}
-}
-
-func (m *MatchMaker) Run() {
-	for {
-		<-m.notify
-
-		m.mu.Lock()
-		if len(m.queue) < 2 {
-			m.mu.Unlock()
-			continue
-		}
-
-		c1 := m.queue[0]
-		c2 := m.queue[1]
-		m.queue = m.queue[2:]
-		m.mu.Unlock()
-
-		slog.Info("Matching clients", "client1", c1.ID, "client2", c2.ID)
-
-		// Notify both clients they are matched
-		err1 := c1.WriteJSON(Message{
-			Type:    "match",
-			Payload: c2.ID,
-		})
-
-		err2 := c2.WriteJSON(Message{
-			Type:    "match",
-			Payload: c1.ID,
-		})
-
-		// If c1 failed, c2 is orphaned (unless c2 also failed).
-		// For simplicity, if we fail to write to one, the other gets a match message
-		// but the peer won't respond. The active client will eventually disconnect.
-		// A more robust solution might re-queue the survivor, but this is a starter fix.
-		if err1 != nil {
-			slog.Error("Failed to send match to client 1", "client_id", c1.ID, "error", err1)
-		}
-		if err2 != nil {
-			slog.Error("Failed to send match to client 2", "client_id", c2.ID, "error", err2)
-		}
-
-		// Check if we still have enough people to run again immediately
-		m.mu.Lock()
-		if len(m.queue) >= 2 {
-			select {
-			case m.notify <- struct{}{}:
-			default:
-			}
-		}
-		m.mu.Unlock()
-	}
-}
-
 var (
 	clients    = make(map[string]*Client)
 	clientsMu  sync.Mutex
-	matchMaker = NewMatchMaker()
+	rdb        *redis.Client
+	matchMaker *MatchMaker
 )
+
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	redisDB := 0
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if db, err := strconv.Atoi(dbStr); err == nil {
+			redisDB = db
+		}
+	}
+
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     getEnv("REDIS_ADDR", "localhost:6379"),
+		Password: getEnv("REDIS_PASSWORD", ""),
+		DB:       redisDB,
+	})
+
+	ctx := context.Background()
+	if _, err := rdb.Ping(ctx).Result(); err != nil {
+		slog.Error("Redis connection failed", "addr", getEnv("REDIS_ADDR", "localhost:6379"), "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Connected to Redis", "addr", getEnv("REDIS_ADDR", "localhost:6379"))
+
+	matchMaker = NewMatchMaker(rdb)
+
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/", handleNotFound)
 
 	port := ":8080"
-	// Start matching loop
-	go matchMaker.Run()
+	go matchMaker.Run(ctx)
 
 	slog.Info("BananaTalk Backend starting", "port", port)
 	err := http.ListenAndServe(port, nil)
@@ -231,8 +170,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		delete(clients, clientID)
 		clientsMu.Unlock()
 
-		// IMPORTANT: Remove from match queue if they are still there
-		matchMaker.Remove(client)
+		// Remove from match queue if still waiting
+		matchMaker.Remove(ctx, clientID)
+		// Clear any active session mapping
+		matchMaker.DeleteSession(ctx, clientID)
 
 		slog.Info("Client fully disconnected", "client_id", clientID)
 	}()
@@ -245,8 +186,26 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		Payload: clientID,
 	})
 
+	// Subscribe to per-client match notification channel before enqueuing so
+	// we never miss a notification published by any backend instance.
+	notifySub := rdb.Subscribe(ctx, redisNotifyPfx+clientID)
+	defer notifySub.Close()
+
+	go func() {
+		for msg := range notifySub.Channel() {
+			peerID := msg.Payload
+			slog.Info("Client matched via Redis notify", "client_id", clientID, "peer_id", peerID)
+			if err := client.WriteJSON(Message{
+				Type:    "match",
+				Payload: peerID,
+			}); err != nil {
+				slog.Error("Failed to send match message", "client_id", clientID, "error", err)
+			}
+		}
+	}()
+
 	// Add to match queue
-	matchMaker.Add(client)
+	matchMaker.Add(ctx, clientID)
 
 	// Start heartbeat
 	go func() {
