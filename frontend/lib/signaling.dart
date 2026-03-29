@@ -195,6 +195,18 @@ class Signaling {
     _send('bye', {}, to: _remoteId);
   }
 
+  /// Tears down the current peer connection and re-enters the matching queue,
+  /// keeping the local stream and WebSocket connection alive.
+  void findNextMatch() {
+    sendBye();
+    // Null out before dispose so in-flight callbacks see no active call.
+    final pc = _peerConnection;
+    _peerConnection = null;
+    _remoteId = null;
+    pc?.dispose();
+    _send('next_match', {});
+  }
+
   void dispose() {
     _localStream?.dispose();
     _peerConnection?.dispose();

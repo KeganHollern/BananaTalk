@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -50,14 +51,38 @@ class ChatScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends ConsumerState<ChatScreen> {
+class _ChatScreenState extends ConsumerState<ChatScreen>
+    with SingleTickerProviderStateMixin {
   late Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
+  late AnimationController _slideController;
+  late Animation<Offset> _outgoingSlide;
+  late Animation<Offset> _incomingSlide;
+  bool _isSliding = false;
+
   @override
   void initState() {
     super.initState();
+    _slideController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    );
+    _outgoingSlide = Tween<Offset>(
+      begin: Offset.zero,
+      end: const Offset(0, -1),
+    ).animate(CurvedAnimation(
+      parent: _slideController,
+      curve: Curves.easeInOut,
+    ));
+    _incomingSlide = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _slideController,
+      curve: Curves.easeInOut,
+    ));
     _connect(widget.token);
     _initRenderers();
   }
@@ -92,7 +117,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     _signaling.onCallEnded = () {
       if (!mounted) return;
-      if (ref.read(callProvider).state == CallState.idle) return;
+      final s = ref.read(callProvider).state;
+      // Already idle or re-entering match queue — nothing to do.
+      if (s == CallState.idle || s == CallState.matching) return;
       _signaling.dispose();
       setState(() {
         _remoteRenderer.srcObject = null;
@@ -111,10 +138,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   @override
   void dispose() {
+    _slideController.dispose();
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     _signaling.dispose();
     super.dispose();
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity < -300) {
+      _swipeToNext();
+    }
+  }
+
+  Future<void> _swipeToNext() async {
+    HapticFeedback.lightImpact();
+    _signaling.findNextMatch();
+
+    setState(() => _isSliding = true);
+    await _slideController.forward();
+    _slideController.reset();
+
+    if (!mounted) return;
+    setState(() {
+      _remoteRenderer.srcObject = null;
+      _isSliding = false;
+    });
+    ref.read(callProvider.notifier).startMatching();
   }
 
   void _join() async {
@@ -247,48 +298,79 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final callStatus = ref.watch(callProvider);
 
     return Scaffold(
-      body: Stack(
-        children: [
-          // Remote Video (Background)
-          Positioned.fill(
-            child: Container(
-              color: Colors.black,
-              child: _remoteRenderer.srcObject != null
-                  ? RTCVideoView(
-                      _remoteRenderer,
-                      objectFit:
-                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                    )
-                  : Center(
-                      child: _buildBackgroundContent(callStatus.state),
-                    ),
-            ),
-          ),
-
-          // Local Video (PiP)
-          Positioned(
-            right: 20,
-            top: 50,
-            width: 120,
-            height: 180,
-            child: Container(
-              decoration: BoxDecoration(
+      body: GestureDetector(
+        // Only active during a live call; upward velocity > 300 triggers next.
+        onVerticalDragEnd: callStatus.state == CallState.connected
+            ? _onVerticalDragEnd
+            : null,
+        child: Stack(
+          children: [
+            // Remote Video / Background content (with slide-up transition)
+            Positioned.fill(
+              child: Container(
                 color: Colors.black,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white24),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: RTCVideoView(
-                _localRenderer,
-                mirror: true,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                child: _isSliding
+                    ? ClipRect(
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // Incoming: matching spinner slides in from below.
+                            SlideTransition(
+                              position: _incomingSlide,
+                              child: Center(
+                                child: _buildBackgroundContent(
+                                    CallState.matching),
+                              ),
+                            ),
+                            // Outgoing: current video slides off to the top.
+                            SlideTransition(
+                              position: _outgoingSlide,
+                              child: RTCVideoView(
+                                _remoteRenderer,
+                                objectFit: RTCVideoViewObjectFit
+                                    .RTCVideoViewObjectFitCover,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : (_remoteRenderer.srcObject != null
+                        ? RTCVideoView(
+                            _remoteRenderer,
+                            objectFit: RTCVideoViewObjectFit
+                                .RTCVideoViewObjectFitCover,
+                          )
+                        : Center(
+                            child: _buildBackgroundContent(callStatus.state),
+                          )),
               ),
             ),
-          ),
 
-          // UI Overlay — state-driven, no ad-hoc boolean flags
-          _buildOverlay(callStatus.state),
-        ],
+            // Local Video (PiP)
+            Positioned(
+              right: 20,
+              top: 50,
+              width: 120,
+              height: 180,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white24),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: RTCVideoView(
+                  _localRenderer,
+                  mirror: true,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ),
+              ),
+            ),
+
+            // UI Overlay — hidden during the slide animation.
+            if (!_isSliding) _buildOverlay(callStatus.state),
+          ],
+        ),
       ),
     );
   }
