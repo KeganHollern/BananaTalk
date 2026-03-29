@@ -48,7 +48,9 @@ type Client struct {
 func (c *Client) WriteJSON(v interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return err
+	}
 	return c.Conn.WriteJSON(v)
 }
 
@@ -155,7 +157,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	clientID := userID
 	client := &Client{ID: clientID, Conn: conn}
@@ -181,15 +183,18 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Client connected (Authenticated)", "client_id", clientID)
 
 	// Send ID to client
-	client.WriteJSON(Message{
+	if err := client.WriteJSON(Message{
 		Type:    "init",
 		Payload: clientID,
-	})
+	}); err != nil {
+		slog.Error("Failed to send init message", "client_id", clientID, "error", err)
+		return
+	}
 
 	// Subscribe to per-client match notification channel before enqueuing so
 	// we never miss a notification published by any backend instance.
 	notifySub := rdb.Subscribe(ctx, redisNotifyPfx+clientID)
-	defer notifySub.Close()
+	defer func() { _ = notifySub.Close() }()
 
 	go func() {
 		for msg := range notifySub.Channel() {
@@ -211,21 +216,21 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ticker := time.NewTicker(pingPeriod)
 		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := client.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
-					slog.Info("Ping failed, closing connection", "client_id", clientID, "error", err)
-					return
-				}
+		for range ticker.C {
+			if err := client.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
+				slog.Info("Ping failed, closing connection", "client_id", clientID, "error", err)
+				return
 			}
 		}
 	}()
 
 	// Limit message size to 8KB (enough for SDP)
 	conn.SetReadLimit(8192)
-	conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error { conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	if err := conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		slog.Error("Failed to set read deadline", "client_id", clientID, "error", err)
+		return
+	}
+	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(pongWait)) })
 
 	for {
 		var msg Message

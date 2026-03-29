@@ -87,7 +87,7 @@ func (m *MatchMaker) DeleteSession(ctx context.Context, userID string) {
 // any instance and falls back to a periodic ticker so no matches are missed.
 func (m *MatchMaker) Run(ctx context.Context) {
 	sub := m.rdb.Subscribe(ctx, redisTriggerKey)
-	defer sub.Close()
+	defer func() { _ = sub.Close() }()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
