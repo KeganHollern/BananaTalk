@@ -110,7 +110,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	banned, err := recordReport(ctx, reporterID, reportedID, reason, url)
+	banned, err := recordReport(ctx, reporterID, reportedID, reason, url, key)
 	if err != nil {
 		slog.Error("report: persist", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

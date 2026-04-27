@@ -123,6 +123,9 @@ func main() {
 
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/report", reportHandler)
+	if initAdmin() {
+		slog.Info("Admin dashboard mounted at /admin/")
+	}
 	http.HandleFunc("/", handleNotFound)
 
 	port := ":8080"

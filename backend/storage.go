@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -17,6 +18,11 @@ import (
 // via the STORAGE_PROVIDER environment variable.
 type Storage interface {
 	Upload(ctx context.Context, key, contentType string, body io.Reader, size int64) (string, error)
+	// Sign returns a URL the admin dashboard can use to fetch the object
+	// referenced by key. If STORAGE_PUBLIC_URL_BASE is set the bucket is
+	// assumed to be publicly readable and that URL is returned directly;
+	// otherwise a presigned/short-lived URL is generated.
+	Sign(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
 func newStorage(ctx context.Context) (Storage, error) {
@@ -85,6 +91,21 @@ func (s *s3Storage) Upload(ctx context.Context, key, contentType string, body io
 	return fmt.Sprintf("s3://%s/%s", s.bucket, key), nil
 }
 
+func (s *s3Storage) Sign(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	if s.publicPrefix != "" {
+		return s.publicPrefix + "/" + key, nil
+	}
+	presigner := s3.NewPresignClient(s.client)
+	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: &s.bucket,
+		Key:    &key,
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", fmt.Errorf("s3 presign: %w", err)
+	}
+	return req.URL, nil
+}
+
 // --- GCS ---
 
 type gcsStorage struct {
@@ -119,4 +140,21 @@ func (g *gcsStorage) Upload(ctx context.Context, key, contentType string, body i
 		return g.publicPrefix + "/" + key, nil
 	}
 	return fmt.Sprintf("https://storage.googleapis.com/%s/%s", g.bucket, url.PathEscape(key)), nil
+}
+
+func (g *gcsStorage) Sign(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	if g.publicPrefix != "" {
+		return g.publicPrefix + "/" + key, nil
+	}
+	// Relies on Application Default Credentials with iam.serviceAccounts.signBlob
+	// permission OR a service-account JSON key.
+	signed, err := g.client.Bucket(g.bucket).SignedURL(key, &storage.SignedURLOptions{
+		Method:  "GET",
+		Expires: time.Now().Add(ttl),
+		Scheme:  storage.SigningSchemeV4,
+	})
+	if err != nil {
+		return "", fmt.Errorf("gcs sign: %w", err)
+	}
+	return signed, nil
 }

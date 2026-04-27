@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BananaTalk Admin</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>
+        <a href="#/">BananaTalk Moderation</a>
+      </h1>
+      <div class="meta" id="meta"></div>
+    </header>
+    <main id="view"></main>
+    <template id="tpl-list">
+      <section class="list-view">
+        <form class="filters" id="filters">
+          <label>
+            Reason contains
+            <input type="text" name="reason" placeholder="e.g. nudity, harassment" />
+          </label>
+          <label>
+            Per page
+            <select name="limit">
+              <option value="20">20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <button type="submit">Apply</button>
+        </form>
+        <div class="report-grid" id="grid"></div>
+        <nav class="pagination" id="pagination"></nav>
+      </section>
+    </template>
+    <template id="tpl-detail">
+      <section class="detail-view">
+        <a class="back" href="#/">&larr; Back to list</a>
+        <div class="detail" id="detail"></div>
+      </section>
+    </template>
+    <script src="app.js"></script>
+  </body>
+</html>
