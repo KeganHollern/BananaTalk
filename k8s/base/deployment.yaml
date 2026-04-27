@@ -33,6 +33,28 @@ spec:
           ports:
             - containerPort: 8080
               protocol: TCP
+          # Liveness only checks the HTTP server is up — a Redis or Postgres
+          # blip must not restart pods with active WebRTC signaling sessions.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness pings Redis + Postgres so an unhealthy pod is pulled
+          # from the Service endpoints without being killed. Tighter cadence
+          # than liveness so traffic shifts quickly during a dependency blip.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
           env:
             - name: REDIS_ADDR
               value: "redis:6379"

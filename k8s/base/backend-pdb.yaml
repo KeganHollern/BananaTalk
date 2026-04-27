@@ -4,7 +4,11 @@ metadata:
   name: bananatalk-backend
   namespace: default
 spec:
-  minAvailable: 1
+  # maxUnavailable: 1 (rather than minAvailable: 1) keeps voluntary
+  # disruption serial as the HPA scales replicas up to 10 — otherwise a
+  # node drain at peak could evict up to N-1 pods at once and drop a
+  # large block of WebSocket sessions.
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: bananatalk-backend

@@ -127,6 +127,8 @@ func main() {
 
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/report", reportHandler)
+	http.HandleFunc("/healthz", livenessHandler)
+	http.HandleFunc("/readyz", readinessHandler)
 	http.Handle("/metrics", metricsHandler())
 	if initAdmin() {
 		slog.Info("Admin dashboard mounted at /admin/")

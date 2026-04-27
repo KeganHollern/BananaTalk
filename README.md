@@ -126,6 +126,63 @@ kubectl apply -k k8s/base/
 | `redis-secret` | `redis-password` | Backend (`REDIS_PASSWORD`), Redis (`--requirepass`) |
 | `postgres-secret` | `postgres-password`, `postgres-user`, `postgres-db` | PostgreSQL StatefulSet |
 
+## Kubernetes
+
+### Health probes
+
+The backend exposes two unauthenticated probe endpoints:
+
+| Endpoint | Purpose | Behavior |
+|---|---|---|
+| `GET /healthz` | Liveness | Always returns `200 ok` if the HTTP server is running. No dependency checks — a transient Redis/Postgres blip must not restart pods that are still serving live WebRTC signaling. |
+| `GET /readyz` | Readiness | Pings Redis and Postgres with a short (1.5s) per-check deadline. Returns `503` if either is unreachable, which removes the pod from the Service endpoints (no new traffic) without killing in-flight sessions. |
+
+Probe tuning in `k8s/base/deployment.yaml` is sized for a long-lived WebSocket
+server: liveness runs every 10s with a 3-failure threshold (~30s grace before
+restart), readiness runs every 5s so traffic shifts off a degraded pod
+quickly.
+
+### Horizontal Pod Autoscaler
+
+`k8s/base/hpa.yaml` autoscales the `bananatalk-backend` Deployment on CPU
+utilization, defaulting to `min=2`, `max=10`, target `70%`. The scale-up
+behavior is aggressive (up to +100% or +2 pods every 30s) so the fleet can
+respond to the Phase 4 load test, while scale-down uses a 5-minute
+stabilization window to avoid flapping when WS connection counts are bursty.
+
+To override min/max for a specific environment, patch the HPA via Kustomize.
+For example, in an overlay:
+
+```yaml
+# k8s/overlays/loadtest/kustomization.yaml
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: bananatalk-backend
+    patch: |
+      - op: replace
+        path: /spec/minReplicas
+        value: 4
+      - op: replace
+        path: /spec/maxReplicas
+        value: 25
+```
+
+Or imperatively (does not survive a re-apply of the manifest):
+
+```bash
+kubectl autoscale deployment bananatalk-backend --min=4 --max=25 --cpu-percent=70
+# or
+kubectl patch hpa bananatalk-backend --patch '{"spec":{"minReplicas":4,"maxReplicas":25}}'
+```
+
+The `bananatalk-backend` PodDisruptionBudget uses `maxUnavailable: 1` so
+voluntary disruptions (node drains, cluster upgrades) stay serial as the HPA
+scales replicas up — preventing a single drain from dropping a large block of
+WebSocket sessions at peak.
+
 ## Roadmap
 
 - [x] **Phase 1: Walking Skeleton** (Signaling, Matching, Basic P2P)
