@@ -129,6 +129,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       }
     };
 
+    _remoteRenderer.addListener(_onRemoteRendererChanged);
+
     _signaling.onCallEnded = () {
       if (!mounted) return;
       final s = ref.read(callProvider).state;
@@ -150,9 +152,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     await _remoteRenderer.initialize();
   }
 
+  void _onRemoteRendererChanged() {
+    // RTCVideoRenderer flips renderVideo true once the platform view has
+    // painted at least one frame — that is our first-frame signal. We only
+    // forward it to the signaling layer once per match attempt.
+    if (_remoteRenderer.renderVideo) {
+      _signaling.reportFirstFrame();
+    }
+  }
+
   @override
   void dispose() {
     _slideController.dispose();
+    _remoteRenderer.removeListener(_onRemoteRendererChanged);
     _localRenderer.dispose();
     _remoteRenderer.dispose();
     _signaling.dispose();
@@ -168,7 +180,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _swipeToNext() async {
     HapticFeedback.lightImpact();
-    _signaling.findNextMatch();
+    final nextMatch = _signaling.findNextMatch();
 
     setState(() => _isSliding = true);
     await _slideController.forward();
@@ -180,11 +192,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       _isSliding = false;
     });
     ref.read(callProvider.notifier).startMatching();
+    await nextMatch;
   }
 
   void _join() async {
     if (Platform.isMacOS) {
-      await _signaling.openUserMedia();
+      await _signaling.prewarm();
       await _signaling.connect();
       ref.read(callProvider.notifier).startMatching();
       return;
@@ -197,7 +210,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     if (statuses[Permission.camera]!.isGranted &&
         statuses[Permission.microphone]!.isGranted) {
-      await _signaling.openUserMedia();
+      // Pre-warm before opening the WebSocket so the local stream + ICE pool
+      // are ready by the time the backend assigns a peer.
+      await _signaling.prewarm();
       await _signaling.connect();
       ref.read(callProvider.notifier).startMatching();
     } else {

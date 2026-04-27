@@ -326,6 +326,12 @@ func min(a, b int) int {
 }
 
 func handleMessage(msg Message) {
+	// Control messages handled server-side, never relayed to a peer.
+	if msg.Type == "connect_metrics" {
+		recordConnectMetrics(msg)
+		return
+	}
+
 	if msg.To == "" {
 		return
 	}
@@ -339,6 +345,74 @@ func handleMessage(msg Message) {
 		if err != nil {
 			slog.Error("Failed to send message", "to", msg.To, "error", err)
 		}
+	}
+}
+
+// recordConnectMetrics observes a client-reported connection-timing payload
+// into Prometheus histograms. Payload schema (all *_ms fields are integers
+// measured from the moment the client received the `match` message):
+//
+//	{
+//	  "role": "offerer" | "answerer",
+//	  "queue_wait_ms": 1234,
+//	  "first_track_ms": 800,
+//	  "first_frame_ms": 1100,
+//	  "ice_gathering_complete_ms": 950,
+//	  "offer_sent_ms": 60,         // offerer only
+//	  "answer_received_ms": 700    // offerer only
+//	}
+//
+// Unknown / non-numeric fields are ignored so the format can evolve without
+// breaking older clients.
+func recordConnectMetrics(msg Message) {
+	payload, ok := msg.Payload.(map[string]interface{})
+	if !ok {
+		return
+	}
+	role, _ := payload["role"].(string)
+	if role != "offerer" && role != "answerer" {
+		role = "unknown"
+	}
+
+	observePhase := func(phase, key string) {
+		v, ok := numberField(payload[key])
+		if !ok {
+			return
+		}
+		connectTimeSeconds.WithLabelValues(phase, role).Observe(v / 1000.0)
+	}
+	observePhase("total", "first_frame_ms")
+	observePhase("first_track", "first_track_ms")
+	observePhase("ice_gathering", "ice_gathering_complete_ms")
+	observePhase("sdp_offer", "offer_sent_ms")
+	observePhase("sdp_answer", "answer_received_ms")
+
+	if v, ok := numberField(payload["queue_wait_ms"]); ok {
+		queueWaitSeconds.Observe(v / 1000.0)
+	}
+
+	slog.Info("connect_metrics",
+		"client_id", msg.From,
+		"role", role,
+		"first_frame_ms", payload["first_frame_ms"],
+		"first_track_ms", payload["first_track_ms"],
+		"ice_gathering_complete_ms", payload["ice_gathering_complete_ms"],
+		"offer_sent_ms", payload["offer_sent_ms"],
+		"answer_received_ms", payload["answer_received_ms"],
+		"queue_wait_ms", payload["queue_wait_ms"],
+	)
+}
+
+func numberField(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
 	}
 }
 

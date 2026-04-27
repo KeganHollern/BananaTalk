@@ -3,16 +3,18 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	redisQueueKey   = "matchmaker:queue"
-	redisSessionPfx = "matchmaker:session:"
-	redisNotifyPfx  = "matchmaker:notify:"
-	redisTriggerKey = "matchmaker:trigger"
+	redisQueueKey      = "matchmaker:queue"
+	redisSessionPfx    = "matchmaker:session:"
+	redisNotifyPfx     = "matchmaker:notify:"
+	redisTriggerKey    = "matchmaker:trigger"
+	redisEnqueueAtHash = "matchmaker:enqueued_at"
 )
 
 // MatchMaker manages the matching queue via Redis, allowing multiple backend
@@ -27,9 +29,13 @@ func NewMatchMaker(rdb *redis.Client) *MatchMaker {
 
 // Add enqueues a user ID into the Redis waiting queue.
 func (m *MatchMaker) Add(ctx context.Context, userID string) {
+	now := time.Now().UnixNano()
 	if err := m.rdb.RPush(ctx, redisQueueKey, userID).Err(); err != nil {
 		slog.Error("MatchMaker: failed to enqueue user", "user_id", userID, "error", err)
 		return
+	}
+	if err := m.rdb.HSet(ctx, redisEnqueueAtHash, userID, now).Err(); err != nil {
+		slog.Error("MatchMaker: failed to record enqueue time", "user_id", userID, "error", err)
 	}
 	slog.Info("Adding client to match queue", "client_id", userID)
 	// Signal all instances that a new user is waiting.
@@ -42,7 +48,40 @@ func (m *MatchMaker) Remove(ctx context.Context, userID string) {
 		slog.Error("MatchMaker: failed to dequeue user", "user_id", userID, "error", err)
 		return
 	}
+	m.rdb.HDel(ctx, redisEnqueueAtHash, userID)
 	slog.Info("Removed client from match queue", "client_id", userID)
+}
+
+// observeMatchLatency reads the enqueue timestamps for a matched pair and
+// records the elapsed seconds for each into the match-latency histogram. The
+// hash entries are deleted after observation so the hash does not grow.
+func (m *MatchMaker) observeMatchLatency(ctx context.Context, ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	vals, err := m.rdb.HMGet(ctx, redisEnqueueAtHash, ids...).Result()
+	if err != nil {
+		slog.Error("MatchMaker: failed to read enqueue times", "error", err)
+		return
+	}
+	now := time.Now().UnixNano()
+	for i, raw := range vals {
+		s, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		ns, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			continue
+		}
+		dt := time.Duration(now - ns)
+		if dt < 0 {
+			continue
+		}
+		matchLatencySeconds.Observe(dt.Seconds())
+		_ = i
+	}
+	m.rdb.HDel(ctx, redisEnqueueAtHash, ids...)
 }
 
 // popPairScript atomically pops two user IDs from the front of the queue.
@@ -119,6 +158,7 @@ func (m *MatchMaker) processMatches(ctx context.Context) {
 
 		slog.Info("Matching clients", "client1", id1, "client2", id2)
 		matchesTotal.Inc()
+		m.observeMatchLatency(ctx, id1, id2)
 		m.SetSession(ctx, id1, id2)
 		m.SetSession(ctx, id2, id1)
 
