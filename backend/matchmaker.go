@@ -118,6 +118,7 @@ func (m *MatchMaker) processMatches(ctx context.Context) {
 		}
 
 		slog.Info("Matching clients", "client1", id1, "client2", id2)
+		matchesTotal.Inc()
 		m.SetSession(ctx, id1, id2)
 		m.SetSession(ctx, id2, id1)
 

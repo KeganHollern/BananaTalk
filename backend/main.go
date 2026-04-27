@@ -65,6 +65,7 @@ var (
 	clientsMu  sync.Mutex
 	rdb        *redis.Client
 	matchMaker *MatchMaker
+	wsLimiter  *ipRateLimiter
 )
 
 func getEnv(key, defaultVal string) string {
@@ -100,6 +101,9 @@ func main() {
 
 	matchMaker = NewMatchMaker(rdb)
 
+	trustProxy := strings.EqualFold(getEnv("TRUST_PROXY_HEADERS", ""), "true")
+	wsLimiter = newIPRateLimiter(wsConnectionsPerMinute, trustProxy)
+
 	dbDSN := getEnv("DB_DSN", "")
 	if dbDSN == "" {
 		slog.Error("DB_DSN environment variable is required")
@@ -123,6 +127,7 @@ func main() {
 
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/report", reportHandler)
+	http.Handle("/metrics", metricsHandler())
 	if initAdmin() {
 		slog.Info("Admin dashboard mounted at /admin/")
 	}
@@ -140,6 +145,15 @@ func main() {
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	// 0. Per-IP rate limit on upgrade attempts. Applied before auth so
+	// unauthenticated floods do not exercise the token verifier.
+	if !wsLimiter.allow(r) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many connection attempts, retry shortly")
+		slog.Warn("WS upgrade rate-limited", "remote_addr", r.RemoteAddr)
+		return
+	}
+
 	// 1. Extract Token from Query Param
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -151,7 +165,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if token == "" {
-		http.Error(w, "Missing authentication token", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "missing_token", "authentication token required")
 		slog.Warn("Connection attempt without token", "remote_addr", r.RemoteAddr)
 		return
 	}
@@ -162,10 +176,17 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// Passing empty string as audience skips audience check, which we can refine later if needed.
 	payload, err := idtoken.Validate(ctx, token, "")
 	if err != nil {
-		slog.Error("Token validation failed", "error", err, "remote_addr", r.RemoteAddr)
-		// Explicitly logging it as expired/invalid for clarity
-		slog.Info("JWT Token expired or invalid", "token_snippet", token[:min(10, len(token))]+"...")
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		slog.Info("JWT validation failed", "error", err, "remote_addr", r.RemoteAddr, "token_snippet", token[:min(10, len(token))]+"...")
+		writeError(w, http.StatusUnauthorized, "invalid_token", "token invalid or expired")
+		return
+	}
+
+	// Defense-in-depth: idtoken.Validate already checks `exp`, but make the
+	// expiration policy explicit at the boundary so clock-skew tweaks cannot
+	// silently relax it.
+	if payload.Expires <= time.Now().Unix() {
+		slog.Info("JWT expired at connect", "remote_addr", r.RemoteAddr, "exp", payload.Expires)
+		writeError(w, http.StatusUnauthorized, "token_expired", "token expired")
 		return
 	}
 
@@ -173,14 +194,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	userID := payload.Subject
 	if userID == "" {
 		slog.Error("Token payload missing subject", "remote_addr", r.RemoteAddr)
-		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_token_claims", "token missing subject")
 		return
 	}
 
 	// 4. Persist user on first login
 	if _, _, err := upsertUser(ctx, userID); err != nil {
 		slog.Error("Failed to upsert user", "user_id", userID, "error", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -188,12 +209,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	banned, err := isUserBanned(ctx, userID)
 	if err != nil {
 		slog.Error("Failed to check ban status", "user_id", userID, "error", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	if banned {
 		slog.Info("Banned user denied connection", "user_id", userID)
-		http.Error(w, "account suspended", http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "account_suspended", "account suspended")
 		return
 	}
 
@@ -210,12 +231,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	clientsMu.Lock()
 	clients[clientID] = client
 	clientsMu.Unlock()
+	activeConnections.Inc()
 
 	// Ensure cleanup happens on exit
 	defer func() {
 		clientsMu.Lock()
 		delete(clients, clientID)
 		clientsMu.Unlock()
+		activeConnections.Dec()
 
 		// Remove from match queue if still waiting
 		matchMaker.Remove(ctx, clientID)

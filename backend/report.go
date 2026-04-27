@@ -9,13 +9,14 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/api/idtoken"
 )
 
 const (
-	maxScreenshotBytes = 10 << 20 // 10 MiB
+	maxScreenshotBytes = 5 << 20 // 5 MiB
 	maxReasonLen       = 500
 )
 
@@ -28,35 +29,45 @@ var storageClient Storage
 func reportHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
+
+	// Cap the total request body up front so a hostile client can't stream a
+	// huge upload past the multipart parser. The +1KiB headroom covers the
+	// reason field, multipart boundaries, and other form parts.
+	r.Body = http.MaxBytesReader(w, r.Body, maxScreenshotBytes+1024)
 
 	ctx := r.Context()
 
 	reporterSub, ok := authenticate(ctx, r)
 	if !ok {
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_token", "token invalid or expired")
 		return
 	}
 
 	if err := r.ParseMultipartForm(maxScreenshotBytes); err != nil {
-		http.Error(w, "invalid multipart form", http.StatusBadRequest)
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 5MB limit")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_form", "invalid multipart form")
 		return
 	}
 
 	reportedSub := strings.TrimSpace(r.FormValue("reported_user_id"))
 	reason := strings.TrimSpace(r.FormValue("reason"))
 	if reportedSub == "" {
-		http.Error(w, "reported_user_id is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_reported_user", "reported_user_id is required")
 		return
 	}
 	if reportedSub == reporterSub {
-		http.Error(w, "cannot report yourself", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "self_report", "cannot report yourself")
 		return
 	}
 	if reason == "" {
-		http.Error(w, "reason is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_reason", "reason is required")
 		return
 	}
 	if len(reason) > maxReasonLen {
@@ -65,20 +76,20 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, header, err := r.FormFile("screenshot")
 	if err != nil {
-		http.Error(w, "screenshot is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_screenshot", "screenshot is required")
 		return
 	}
 	defer func() { _ = file.Close() }()
 
 	if header.Size > maxScreenshotBytes {
-		http.Error(w, "screenshot too large", http.StatusRequestEntityTooLarge)
+		writeError(w, http.StatusRequestEntityTooLarge, "screenshot_too_large", "screenshot exceeds 5MB limit")
 		return
 	}
 
 	reporterID, _, err := upsertUser(ctx, reporterSub)
 	if err != nil {
 		slog.Error("report: upsert reporter", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -91,7 +102,7 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			slog.Error("report: lookup reported", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 	}
@@ -99,21 +110,21 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 	key, err := screenshotKey()
 	if err != nil {
 		slog.Error("report: generate key", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
 	url, err := storageClient.Upload(ctx, key, "image/png", file, header.Size)
 	if err != nil {
 		slog.Error("report: upload screenshot", "error", err)
-		http.Error(w, "upload failed", http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "upload_failed", "screenshot upload failed")
 		return
 	}
 
 	banned, err := recordReport(ctx, reporterID, reportedID, reason, url, key)
 	if err != nil {
 		slog.Error("report: persist", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -126,6 +137,12 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		clientsMu.Unlock()
 	}
+
+	bannedLabel := "false"
+	if banned {
+		bannedLabel = "true"
+	}
+	reportsTotal.WithLabelValues(bannedLabel).Inc()
 
 	slog.Info("Report received",
 		"reporter_sub", reporterSub,
@@ -155,6 +172,13 @@ func authenticate(ctx context.Context, r *http.Request) (string, bool) {
 	payload, err := idtoken.Validate(ctx, token, "")
 	if err != nil {
 		slog.Info("token validation failed", "error", err, "remote_addr", r.RemoteAddr)
+		return "", false
+	}
+	// Defense-in-depth expiration check; idtoken.Validate already enforces it
+	// but keeping the policy explicit at the boundary protects against future
+	// library changes.
+	if payload.Expires <= time.Now().Unix() {
+		slog.Info("token expired", "remote_addr", r.RemoteAddr, "exp", payload.Expires)
 		return "", false
 	}
 	if payload.Subject == "" {
