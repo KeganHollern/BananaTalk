@@ -73,6 +73,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   late Animation<Offset> _incomingSlide;
   bool _isSliding = false;
 
+  bool _micEnabled = true;
+  bool _camEnabled = true;
+
   @override
   void initState() {
     super.initState();
@@ -328,6 +331,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     );
   }
 
+  void _toggleMic() {
+    final stream = _localRenderer.srcObject;
+    final tracks = stream?.getAudioTracks();
+    if (tracks == null || tracks.isEmpty) return;
+    final next = !tracks.first.enabled;
+    tracks.first.enabled = next;
+    setState(() => _micEnabled = next);
+  }
+
+  void _toggleCamera() {
+    final stream = _localRenderer.srcObject;
+    final tracks = stream?.getVideoTracks();
+    if (tracks == null || tracks.isEmpty) return;
+    final next = !tracks.first.enabled;
+    tracks.first.enabled = next;
+    setState(() => _camEnabled = next);
+  }
+
   void _endCall() {
     _signaling.sendBye();
     _signaling.dispose();
@@ -418,9 +439,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   style: TextStyle(color: Colors.white, fontSize: 18),
                 ),
                 const SizedBox(height: 20),
-                IconButton(
-                  onPressed: _endCall,
-                  icon: const Icon(Icons.call_end, color: Colors.red, size: 40),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _CircleToolbarButton(
+                      tooltip: _micEnabled ? 'Mute microphone' : 'Unmute microphone',
+                      icon: _micEnabled ? Icons.mic : Icons.mic_off,
+                      onPressed: _toggleMic,
+                    ),
+                    const SizedBox(width: 24),
+                    IconButton(
+                      onPressed: _endCall,
+                      icon: const Icon(Icons.call_end, color: Colors.red, size: 40),
+                    ),
+                    const SizedBox(width: 24),
+                    _CircleToolbarButton(
+                      tooltip: _camEnabled ? 'Turn camera off' : 'Turn camera on',
+                      icon: _camEnabled ? Icons.videocam : Icons.videocam_off,
+                      onPressed: _toggleCamera,
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -540,6 +578,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             if (!_isSliding) _buildOverlay(callStatus.state),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _CircleToolbarButton extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  const _CircleToolbarButton({
+    required this.tooltip,
+    required this.icon,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black54,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: IconButton(
+        tooltip: tooltip,
+        icon: Icon(icon, color: Colors.white, size: 22),
+        onPressed: onPressed,
       ),
     );
   }
