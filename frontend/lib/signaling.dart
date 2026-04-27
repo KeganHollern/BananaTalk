@@ -25,6 +25,8 @@ class Signaling {
 
   Signaling(this.serverUrl, this.token); // Update constructor
 
+  String? get remoteId => _remoteId;
+
   Future<void> connect() async {
     // Append token to URL
     final urlWithToken = '$serverUrl?token=$token';

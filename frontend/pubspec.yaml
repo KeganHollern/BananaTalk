@@ -18,6 +18,8 @@ dependencies:
   flutter_secure_storage: ^10.0.0
   jwt_decoder: ^2.0.1
   flutter_logs: ^2.2.1
+  http: ^1.2.0
+  shared_preferences: ^2.2.2
 
 flutter:
   uses-material-design: true

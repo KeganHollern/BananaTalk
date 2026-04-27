@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -11,6 +13,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'call_state.dart';
 import 'services/logger_service.dart';
+import 'services/report_service.dart';
 import 'signaling.dart';
 
 void main() async {
@@ -41,6 +44,7 @@ class MyApp extends StatelessWidget {
 // For Android Emulator: '10.0.2.2'
 // For physical devices or iOS Simulator: Use your computer's local IP (e.g., '192.168.1.27')
 const String serverUrl = 'wss://bt.lystic.dev/ws';
+const String reportUrl = 'https://bt.lystic.dev/report';
 // ---------------------
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -56,6 +60,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   late Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+  final ReportService _reportService =
+      ReportService(endpoint: Uri.parse(reportUrl));
+  final GlobalKey _remoteVideoKey = GlobalKey();
+
+  /// When non-null, painted over the remote video to "freeze" it during the
+  /// reporting flow.
+  Uint8List? _frozenFrame;
 
   late AnimationController _slideController;
   late Animation<Offset> _outgoingSlide;
@@ -189,6 +200,132 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     } else {
       LoggerService().logInfo('ChatScreen', 'Permissions denied');
     }
+  }
+
+  Future<Uint8List?> _captureRemoteFrame() async {
+    final stream = _remoteRenderer.srcObject;
+    final track = stream?.getVideoTracks().isNotEmpty == true
+        ? stream!.getVideoTracks().first
+        : null;
+    if (track != null) {
+      try {
+        final buffer = await track.captureFrame();
+        return buffer.asUint8List();
+      } catch (e, s) {
+        LoggerService()
+            .logError('ChatScreen', 'captureFrame failed, falling back', e, s);
+      }
+    }
+
+    try {
+      final ctx = _remoteVideoKey.currentContext;
+      if (ctx == null) return null;
+      // ignore: use_build_context_synchronously
+      final boundary = ctx.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return null;
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      final ByteData? data =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      return data?.buffer.asUint8List();
+    } catch (e, s) {
+      LoggerService()
+          .logError('ChatScreen', 'RepaintBoundary capture failed', e, s);
+      return null;
+    }
+  }
+
+  Future<void> _onReportTap() async {
+    final reportedId = _signaling.remoteId;
+    if (reportedId == null) return;
+
+    ref.read(callProvider.notifier).startReporting();
+    final frame = await _captureRemoteFrame();
+    if (!mounted) return;
+    if (frame == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not capture frame for report.')),
+      );
+      ref.read(callProvider.notifier).onConnected();
+      return;
+    }
+    setState(() => _frozenFrame = frame);
+
+    final reason = await _showReasonSheet();
+    if (!mounted) return;
+
+    if (reason == null) {
+      // User cancelled — unfreeze and return to connected.
+      setState(() => _frozenFrame = null);
+      ref.read(callProvider.notifier).onConnected();
+      return;
+    }
+
+    final ok = await _reportService.submit(
+      token: widget.token,
+      reportedUserId: reportedId,
+      reason: reason,
+      frameBytes: frame,
+      filename: 'screenshot.jpg',
+    );
+    await _reportService.block(reportedId);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok
+            ? 'User reported. Finding new match...'
+            : 'Report failed to upload. Finding new match...'),
+      ),
+    );
+
+    setState(() => _frozenFrame = null);
+    await _swipeToNext();
+  }
+
+  Future<String?> _showReasonSheet() {
+    const reasons = <String>[
+      'Nudity',
+      'Harassment',
+      'Underage',
+      'Spam',
+      'Other',
+    ];
+    return showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      isDismissible: true,
+      enableDrag: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetCtx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+                child: Text(
+                  'Reason for reporting?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              for (final r in reasons)
+                ListTile(
+                  title: Text(r,
+                      style: const TextStyle(color: Colors.white)),
+                  onTap: () => Navigator.of(sheetCtx).pop(r),
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   void _endCall() {
@@ -335,10 +472,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         ),
                       )
                     : (_remoteRenderer.srcObject != null
-                        ? RTCVideoView(
-                            _remoteRenderer,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
+                        ? Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              RepaintBoundary(
+                                key: _remoteVideoKey,
+                                child: RTCVideoView(
+                                  _remoteRenderer,
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitCover,
+                                ),
+                              ),
+                              if (_frozenFrame != null)
+                                Image.memory(
+                                  _frozenFrame!,
+                                  fit: BoxFit.cover,
+                                  gaplessPlayback: true,
+                                ),
+                            ],
                           )
                         : Center(
                             child: _buildBackgroundContent(callStatus.state),
@@ -366,6 +517,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 ),
               ),
             ),
+
+            // Report shield — only visible during a live, connected call.
+            if (!_isSliding && callStatus.state == CallState.connected)
+              Positioned(
+                top: 50,
+                left: 20,
+                child: Material(
+                  color: Colors.black54,
+                  shape: const CircleBorder(),
+                  clipBehavior: Clip.antiAlias,
+                  child: IconButton(
+                    tooltip: 'Report user',
+                    icon: const Icon(Icons.shield_outlined,
+                        color: Colors.white, size: 22),
+                    onPressed: _onReportTap,
+                  ),
+                ),
+              ),
 
             // UI Overlay — hidden during the slide animation.
             if (!_isSliding) _buildOverlay(callStatus.state),
