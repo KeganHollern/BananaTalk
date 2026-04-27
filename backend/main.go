@@ -114,7 +114,15 @@ func main() {
 	defer db.Close()
 	slog.Info("Connected to PostgreSQL")
 
+	storageClient, dbErr = newStorage(ctx)
+	if dbErr != nil {
+		slog.Error("Object storage init failed", "error", dbErr)
+		os.Exit(1)
+	}
+	slog.Info("Object storage ready", "provider", getEnv("STORAGE_PROVIDER", ""), "bucket", getEnv("STORAGE_BUCKET", ""))
+
 	http.HandleFunc("/ws", handleConnections)
+	http.HandleFunc("/report", reportHandler)
 	http.HandleFunc("/", handleNotFound)
 
 	port := ":8080"
@@ -167,9 +175,22 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Persist user on first login
-	if _, err := upsertUser(ctx, userID); err != nil {
+	if _, _, err := upsertUser(ctx, userID); err != nil {
 		slog.Error("Failed to upsert user", "user_id", userID, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// 5. Reject banned users.
+	banned, err := isUserBanned(ctx, userID)
+	if err != nil {
+		slog.Error("Failed to check ban status", "user_id", userID, "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if banned {
+		slog.Info("Banned user denied connection", "user_id", userID)
+		http.Error(w, "account suspended", http.StatusForbidden)
 		return
 	}
 
