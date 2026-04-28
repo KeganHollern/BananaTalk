@@ -145,6 +145,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         const SnackBar(content: Text('Call ended')),
       );
     };
+
+    _signaling.onServerShutdown = () async {
+      if (!mounted) return;
+      // Treat the in-progress match/call as gone: drop the remote video,
+      // surface a "Reconnecting…" state to the user, and let signaling
+      // re-establish the WebSocket with backoff. The local media stream is
+      // preserved so the camera/mic permission prompt does not re-appear.
+      setState(() {
+        _remoteRenderer.srcObject = null;
+      });
+      ref.read(callProvider.notifier).startMatching();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Reconnecting…')),
+      );
+      await _signaling.reconnect();
+    };
   }
 
   Future<void> _initRenderers() async {

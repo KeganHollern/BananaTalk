@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -137,15 +140,43 @@ func main() {
 	port := ":8080"
 	go matchMaker.Run(ctx)
 
-	slog.Info("BananaTalk Backend starting", "port", port)
-	err := http.ListenAndServe(port, nil)
-	if err != nil {
-		slog.Error("ListenAndServe failed", "error", err)
-		os.Exit(1)
+	server := &http.Server{Addr: port}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		slog.Info("BananaTalk Backend starting", "port", port)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+		close(serverErr)
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			slog.Error("ListenAndServe failed", "error", err)
+			os.Exit(1)
+		}
+	case sig := <-sigCh:
+		slog.Info("Shutdown signal received", "signal", sig.String())
+		gracefulShutdown(server)
 	}
 }
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
+	// Reject new upgrades on a draining pod. The Service will pull this pod
+	// from its endpoints once the readiness probe trips, but until that
+	// happens (and for any client that already had this pod selected) we
+	// 503 so the client retries against a healthy replica.
+	if shuttingDown.Load() {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "shutting_down", "server is shutting down")
+		return
+	}
+
 	// 0. Per-IP rate limit on upgrade attempts. Applied before auth so
 	// unauthenticated floods do not exercise the token verifier.
 	if !wsLimiter.allow(r) {

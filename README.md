@@ -183,6 +183,30 @@ voluntary disruptions (node drains, cluster upgrades) stay serial as the HPA
 scales replicas up — preventing a single drain from dropping a large block of
 WebSocket sessions at peak.
 
+### Graceful shutdown
+
+On `SIGTERM` or `SIGINT` (rolling updates, HPA scale-down, node drains) the
+backend runs a five-phase drain instead of dropping connections abruptly:
+
+1. Flip an internal `shuttingDown` flag — `/readyz` starts returning `503`
+   so the kubelet pulls the pod from the Service endpoints, and any new
+   `/ws` upgrade is rejected with `503 shutting_down`.
+2. Sleep ~3s so the readiness probe has a tick to propagate.
+3. Broadcast a `{"type": "server_shutdown"}` JSON message to every connected
+   client. The Flutter client treats this as a transient event: it tears
+   down the peer connection, transitions to the "Reconnecting…" state, and
+   re-establishes the WebSocket with exponential backoff against a healthy
+   replica.
+4. Send a clean WS `CloseGoingAway` frame to each client and close the
+   socket — the existing per-connection cleanup (matchmaker queue/session
+   eviction) runs from its `defer`.
+5. `http.Server.Shutdown` with a 25s deadline drains any non-WS handlers
+   (`/admin`, `/report`, `/metrics`).
+
+The Pod's `terminationGracePeriodSeconds` is set to **35s** in
+`k8s/base/deployment.yaml` to comfortably cover the 25s shutdown deadline
+plus the readiness drain pause before SIGKILL fires.
+
 ## Roadmap
 
 - [x] **Phase 1: Walking Skeleton** (Signaling, Matching, Basic P2P)

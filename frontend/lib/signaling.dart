@@ -22,6 +22,13 @@ class Signaling {
   void Function()? onCallEnded;
   void Function(dynamic error)? onConnectionError;
 
+  /// Fired when the backend pod sends a `server_shutdown` message ahead of a
+  /// graceful drain (rolling update / scale-down). The signaling layer has
+  /// already torn down its peer connection and closed the channel by the
+  /// time this fires; the renderer is expected to transition to a
+  /// "Reconnecting…" state and call back into [reconnect].
+  void Function()? onServerShutdown;
+
   /// Fired once per match when the timing report is sent to the backend.
   /// The renderer can also drive [reportFirstFrame] later if it detects an
   /// actual painted frame; that just enriches the same in-memory report.
@@ -29,6 +36,11 @@ class Signaling {
 
   String? _selfId;
   String? _remoteId;
+
+  /// Set when a `server_shutdown` message has been received. Suppresses the
+  /// onCallEnded path that would otherwise fire when the channel closes
+  /// moments later — the renderer is reconnecting, not ending the call.
+  bool _serverShutdownInFlight = false;
 
   ConnectTiming? _timing;
 
@@ -47,21 +59,62 @@ class Signaling {
   Future<void> connect() async {
     final urlWithToken = '$serverUrl?token=$token';
     _channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
+    _attachChannelListeners(_channel!);
+  }
 
-    _channel!.stream.listen(
+  void _attachChannelListeners(WebSocketChannel channel) {
+    channel.stream.listen(
       (message) {
         _handleMessage(jsonDecode(message));
       },
       onError: (error) {
+        if (_serverShutdownInFlight) return;
         LoggerService().logError(
             'Signaling', 'WebSocket error', error, StackTrace.current);
         onConnectionError?.call(error);
       },
       onDone: () {
         LoggerService().logInfo('Signaling', 'WebSocket closed');
+        if (_serverShutdownInFlight) return;
         onCallEnded?.call();
       },
     );
+  }
+
+  /// Reconnects after a `server_shutdown`. Rebuilds the peer connection via
+  /// [prewarm] (the local media stream is preserved across the reconnect so
+  /// the user is not re-prompted for camera/mic) and re-establishes the
+  /// WebSocket with exponential backoff. Returns once a fresh channel is
+  /// open or after the attempt budget is exhausted (in which case
+  /// [onConnectionError] is invoked).
+  Future<void> reconnect() async {
+    _serverShutdownInFlight = false;
+    await prewarm();
+
+    const maxAttempts = 8;
+    Duration delay = const Duration(seconds: 1);
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final urlWithToken = '$serverUrl?token=$token';
+        final channel = WebSocketChannel.connect(Uri.parse(urlWithToken));
+        await channel.ready.timeout(const Duration(seconds: 5));
+        _channel = channel;
+        _attachChannelListeners(channel);
+        LoggerService().logInfo(
+            'Signaling', 'Reconnected after server shutdown (attempt $attempt)');
+        return;
+      } catch (e) {
+        LoggerService().logInfo(
+            'Signaling', 'Reconnect attempt $attempt failed: $e');
+        await Future.delayed(delay);
+        delay *= 2;
+        if (delay.inSeconds > 10) delay = const Duration(seconds: 10);
+      }
+    }
+    LoggerService().logError(
+        'Signaling', 'Reconnect: attempt budget exhausted', null,
+        StackTrace.current);
+    onConnectionError?.call('reconnect_failed');
   }
 
   void _handleMessage(Map<String, dynamic> msg) async {
@@ -104,7 +157,29 @@ class Signaling {
           onCallEnded?.call();
         }
         break;
+      case 'server_shutdown':
+        _handleServerShutdown();
+        break;
     }
+  }
+
+  /// Tear down peer connection + channel in response to the backend's
+  /// graceful-shutdown notification. Keeps the local media stream alive so
+  /// the renderer can re-prewarm without re-prompting for camera/mic.
+  void _handleServerShutdown() {
+    if (_serverShutdownInFlight) return;
+    _serverShutdownInFlight = true;
+    LoggerService().logInfo(
+        'Signaling', 'Server shutdown notice received, will reconnect');
+    final pc = _peerConnection;
+    _peerConnection = null;
+    _remoteId = null;
+    _remoteDescriptionSet = false;
+    _pendingRemoteCandidates.clear();
+    pc?.dispose();
+    _channel?.sink.close();
+    _channel = null;
+    onServerShutdown?.call();
   }
 
   bool _inCall() {

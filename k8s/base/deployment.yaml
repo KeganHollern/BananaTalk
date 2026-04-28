@@ -26,6 +26,11 @@ spec:
       labels:
         app: bananatalk-backend
     spec:
+      # Sized to fit the backend's graceful-shutdown sequence (see
+      # backend/shutdown.go): 3s readiness drain pause + ~1s broadcast/close
+      # + up to 25s http.Server.Shutdown deadline. The 35s ceiling leaves a
+      # small margin before the kubelet sends SIGKILL.
+      terminationGracePeriodSeconds: 35
       containers:
         - name: bananatalk-backend
           image: ghcr.io/keganhollern/bananatalk-backend:latest

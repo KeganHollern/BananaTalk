@@ -24,7 +24,15 @@ func livenessHandler(w http.ResponseWriter, _ *http.Request) {
 // readinessHandler answers /readyz. Pings Redis and Postgres with a short
 // per-check deadline. Failure pulls the pod out of the Service endpoints
 // (kubelet stops sending new traffic) without killing in-flight WS sessions.
+//
+// Once shuttingDown is set, returns 503 unconditionally so the kubelet pulls
+// this pod from the Service before gracefulShutdown closes existing sessions.
 func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	if shuttingDown.Load() {
+		http.Error(w, "shutting down", http.StatusServiceUnavailable)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), healthProbeTimeout)
 	defer cancel()
 
