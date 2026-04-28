@@ -166,7 +166,7 @@ func adminGetReport(w http.ResponseWriter, r *http.Request) {
 
 	signed := signScreenshot(r.Context(), row)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"report":               row,
+		"report":                row,
 		"signed_screenshot_url": signed,
 	})
 }

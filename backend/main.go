@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
-	"google.golang.org/api/idtoken"
 )
 
 const (
@@ -156,47 +155,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Extract Token from Query Param
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		// Fallback to Bearer header if needed, but Query is easier for WS
-		authHeader := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			token = strings.TrimPrefix(authHeader, "Bearer ")
-		}
-	}
-
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing_token", "authentication token required")
-		slog.Warn("Connection attempt without token", "remote_addr", r.RemoteAddr)
-		return
-	}
-
-	// 2. Verify Token
+	// 1. Extract + verify token. verifyToken handles missing / invalid /
+	// expired / missing-subject in one place (see auth.go).
+	token := bearerToken(r)
 	ctx := context.Background()
-	// validating for any audience for now, as we might have multiple client IDs (iOS, Web, Android)
-	// Passing empty string as audience skips audience check, which we can refine later if needed.
-	payload, err := idtoken.Validate(ctx, token, "")
-	if err != nil {
-		slog.Info("JWT validation failed", "error", err, "remote_addr", r.RemoteAddr, "token_snippet", token[:min(10, len(token))]+"...")
-		writeError(w, http.StatusUnauthorized, "invalid_token", "token invalid or expired")
-		return
-	}
-
-	// Defense-in-depth: idtoken.Validate already checks `exp`, but make the
-	// expiration policy explicit at the boundary so clock-skew tweaks cannot
-	// silently relax it.
-	if payload.Expires <= time.Now().Unix() {
-		slog.Info("JWT expired at connect", "remote_addr", r.RemoteAddr, "exp", payload.Expires)
-		writeError(w, http.StatusUnauthorized, "token_expired", "token expired")
-		return
-	}
-
-	// 3. Extract Unique User ID (sub)
-	userID := payload.Subject
-	if userID == "" {
-		slog.Error("Token payload missing subject", "remote_addr", r.RemoteAddr)
-		writeError(w, http.StatusUnauthorized, "invalid_token_claims", "token missing subject")
+	userID, code, verr := verifyToken(ctx, token)
+	if code != "" {
+		logTokenFailure(code, verr, token, r.RemoteAddr)
+		writeError(w, http.StatusUnauthorized, code, tokenErrMessage(code))
 		return
 	}
 
@@ -318,13 +284,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		msg.From = clientID
 		handleMessage(msg)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func handleMessage(msg Message) {

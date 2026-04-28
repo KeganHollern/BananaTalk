@@ -20,16 +20,16 @@ const wsConnectionsPerMinute = 5
 const ipLimiterIdleTTL = 10 * time.Minute
 
 type ipLimiter struct {
-	limiter *rate.Limiter
+	limiter  *rate.Limiter
 	lastSeen time.Time
 }
 
 type ipRateLimiter struct {
-	mu        sync.Mutex
-	limiters  map[string]*ipLimiter
-	rate      rate.Limit
-	burst     int
-	trustXFF  bool
+	mu       sync.Mutex
+	limiters map[string]*ipLimiter
+	rate     rate.Limit
+	burst    int
+	trustXFF bool
 }
 
 func newIPRateLimiter(perMinute int, trustXFF bool) *ipRateLimiter {

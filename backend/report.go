@@ -9,10 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
-	"google.golang.org/api/idtoken"
 )
 
 const (
@@ -158,33 +156,13 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 // authenticate extracts and validates the bearer token from the request.
 // Returns the google_sub of the authenticated user.
 func authenticate(ctx context.Context, r *http.Request) (string, bool) {
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		authHeader := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			token = strings.TrimPrefix(authHeader, "Bearer ")
-		}
-	}
-	if token == "" {
+	token := bearerToken(r)
+	sub, code, verr := verifyToken(ctx, token)
+	if code != "" {
+		logTokenFailure(code, verr, token, r.RemoteAddr)
 		return "", false
 	}
-
-	payload, err := idtoken.Validate(ctx, token, "")
-	if err != nil {
-		slog.Info("token validation failed", "error", err, "remote_addr", r.RemoteAddr)
-		return "", false
-	}
-	// Defense-in-depth expiration check; idtoken.Validate already enforces it
-	// but keeping the policy explicit at the boundary protects against future
-	// library changes.
-	if payload.Expires <= time.Now().Unix() {
-		slog.Info("token expired", "remote_addr", r.RemoteAddr, "exp", payload.Expires)
-		return "", false
-	}
-	if payload.Subject == "" {
-		return "", false
-	}
-	return payload.Subject, true
+	return sub, true
 }
 
 func screenshotKey() (string, error) {
