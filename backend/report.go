@@ -126,10 +126,12 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// recordReport also persisted a block row inside its txn; reflect that in
-	// the reporter's online block SET so the matchmaker honors it before the
-	// reporter's next reconnect.
+	// recordReport persisted a symmetric pair of block rows inside its txn;
+	// reflect both directions in the online block SETs so the matchmaker
+	// honors the block before either side reconnects. AddBlock is a no-op for
+	// offline users, who'll rehydrate from Postgres on next connect.
 	matchMaker.AddBlock(ctx, reporterSub, reportedSub)
+	matchMaker.AddBlock(ctx, reportedSub, reporterSub)
 
 	if banned {
 		slog.Info("Auto-banned user", "reported_sub", reportedSub, "reported_id", reportedID)

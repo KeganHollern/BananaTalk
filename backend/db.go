@@ -149,10 +149,11 @@ func recordReport(ctx context.Context, reporterID, reportedID int64, reason, scr
 		return false, fmt.Errorf("insert report: %w", err)
 	}
 
-	// Reporting implies blocking — the reporter should not be re-matched with
-	// the reported user. Idempotent so repeat reports don't error.
+	// Reporting implies a symmetric block — neither side should be re-matched
+	// with the other. The schema is directional, so we write both rows; ON
+	// CONFLICT keeps repeat reports idempotent.
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)
+		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2), ($2, $1)
 		 ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
 		reporterID, reportedID,
 	); err != nil {
@@ -325,14 +326,16 @@ func banUser(ctx context.Context, id int64) (googleSub string, changed bool, err
 	return googleSub, false, nil
 }
 
-// insertBlock records that blockerID has blocked blockedID. Idempotent: a
-// duplicate (blocker_id, blocked_id) pair is silently ignored.
+// insertBlock records a symmetric block between blockerID and blockedID:
+// neither user can be re-matched with the other from any pod. Two directional
+// rows are written so loadUserBlocks works unchanged on either side.
+// Idempotent: duplicate pairs are silently ignored.
 func insertBlock(ctx context.Context, blockerID, blockedID int64) error {
 	if blockerID == blockedID {
 		return fmt.Errorf("insertBlock: cannot block self")
 	}
 	_, err := db.Exec(ctx,
-		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)
+		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2), ($2, $1)
 		 ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
 		blockerID, blockedID,
 	)

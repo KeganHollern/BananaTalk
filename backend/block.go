@@ -79,7 +79,11 @@ func blockHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Symmetric: insertBlock wrote both DB rows, so reflect both in Redis.
+	// AddBlock is a no-op for offline users, who'll rehydrate from Postgres on
+	// next connect.
 	matchMaker.AddBlock(ctx, blockerSub, blockedSub)
+	matchMaker.AddBlock(ctx, blockedSub, blockerSub)
 
 	slog.Info("Block recorded", "blocker_sub", blockerSub, "blocked_sub", blockedSub)
 

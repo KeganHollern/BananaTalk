@@ -141,6 +141,45 @@ func TestMatchMaker_PairBlockedDetectsEitherDirection(t *testing.T) {
 	}
 }
 
+// Mirrors the post-symmetric-block production state: both A→B and B→A rows
+// land in Postgres, so on connect each side hydrates a SET containing the
+// other. pairBlocked must return true regardless of arg order or which side
+// originally initiated the block.
+func TestMatchMaker_PairBlockedSymmetricAfterBothHydrate(t *testing.T) {
+	mm, _, _ := newTestMatchMaker(t)
+	ctx := context.Background()
+
+	// Both sides come online and hydrate from the symmetric DB rows.
+	mm.HydrateBlocks(ctx, "alice", []string{"bob"})
+	mm.HydrateBlocks(ctx, "bob", []string{"alice"})
+
+	if !mm.pairBlocked(ctx, "alice", "bob") {
+		t.Fatalf("pairBlocked(alice, bob) must be true")
+	}
+	if !mm.pairBlocked(ctx, "bob", "alice") {
+		t.Fatalf("pairBlocked(bob, alice) must be true (arg order should not matter)")
+	}
+}
+
+// If only the side that did NOT initiate the block is online (e.g. A reported
+// B from a different pod and is now offline; B reconnects fresh), pairBlocked
+// must still reject the pair purely from B's hydrated set. This is the case
+// the symmetric DB write fixes.
+func TestMatchMaker_PairBlockedFromReverseDirectionOnly(t *testing.T) {
+	mm, _, _ := newTestMatchMaker(t)
+	ctx := context.Background()
+
+	// alice is offline (no SET); bob hydrated from his reverse-direction row.
+	mm.HydrateBlocks(ctx, "bob", []string{"alice"})
+
+	if !mm.pairBlocked(ctx, "alice", "bob") {
+		t.Fatalf("pairBlocked must reject the pair from bob's side alone")
+	}
+	if !mm.pairBlocked(ctx, "bob", "alice") {
+		t.Fatalf("pairBlocked must reject the pair from bob's side alone, reversed args")
+	}
+}
+
 func TestMatchMaker_HydrateBlocksReplacesExisting(t *testing.T) {
 	mm, _, _ := newTestMatchMaker(t)
 	ctx := context.Background()

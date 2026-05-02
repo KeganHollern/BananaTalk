@@ -27,6 +27,40 @@ func TestInsertBlock_PersistsRow(t *testing.T) {
 	}
 }
 
+// App Store reviewers manually verify that blocking is two-directional. A
+// one-sided block ships as broken blocking and fails review, so insertBlock
+// must persist both (A→B) and (B→A) rows.
+func TestInsertBlock_IsSymmetric(t *testing.T) {
+	setupTestDB(t)
+	ctx := context.Background()
+
+	reporters, reported := seedUsers(ctx, t, 1)
+
+	if err := insertBlock(ctx, reporters[0], reported); err != nil {
+		t.Fatalf("insertBlock: %v", err)
+	}
+
+	// Reverse-direction row must exist: the reported user has the reporter
+	// in their block list, so the matchmaker rejects the pair from B's pod
+	// after rehydrate.
+	reverseSubs, err := loadUserBlocks(ctx, reported)
+	if err != nil {
+		t.Fatalf("loadUserBlocks (reported side): %v", err)
+	}
+	if len(reverseSubs) != 1 || reverseSubs[0] != "reporter-0" {
+		t.Fatalf("reported's block list after symmetric insert: want [reporter-0], got %v", reverseSubs)
+	}
+
+	// And the original direction is still there.
+	forwardSubs, err := loadUserBlocks(ctx, reporters[0])
+	if err != nil {
+		t.Fatalf("loadUserBlocks (reporter side): %v", err)
+	}
+	if len(forwardSubs) != 1 || forwardSubs[0] != "reported-user-sub" {
+		t.Fatalf("reporter's block list: want [reported-user-sub], got %v", forwardSubs)
+	}
+}
+
 func TestInsertBlock_Idempotent(t *testing.T) {
 	setupTestDB(t)
 	ctx := context.Background()

@@ -120,6 +120,36 @@ func TestRecordReport_AutoBansAfterThreshold(t *testing.T) {
 	}
 }
 
+// A report from A about B must block both directions; otherwise B can rematch
+// with A on a different pod and resume harassing them. App Store review treats
+// one-directional blocking as a defect.
+func TestRecordReport_BlockIsSymmetric(t *testing.T) {
+	setupTestDB(t)
+	ctx := context.Background()
+
+	reporters, reported := seedUsers(ctx, t, 1)
+
+	if _, err := recordReport(ctx, reporters[0], reported, "spam", "https://example/k", "k"); err != nil {
+		t.Fatalf("recordReport: %v", err)
+	}
+
+	reporterSubs, err := loadUserBlocks(ctx, reporters[0])
+	if err != nil {
+		t.Fatalf("loadUserBlocks (reporter): %v", err)
+	}
+	if len(reporterSubs) != 1 || reporterSubs[0] != "reported-user-sub" {
+		t.Fatalf("reporter's block list: want [reported-user-sub], got %v", reporterSubs)
+	}
+
+	reportedSubs, err := loadUserBlocks(ctx, reported)
+	if err != nil {
+		t.Fatalf("loadUserBlocks (reported): %v", err)
+	}
+	if len(reportedSubs) != 1 || reportedSubs[0] != "reporter-0" {
+		t.Fatalf("reported user's block list (reverse direction): want [reporter-0], got %v", reportedSubs)
+	}
+}
+
 func TestRecordReport_BannedFlagOnlyOnTransition(t *testing.T) {
 	setupTestDB(t)
 	ctx := context.Background()
