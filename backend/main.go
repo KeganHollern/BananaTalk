@@ -129,6 +129,7 @@ func main() {
 
 	http.HandleFunc("/ws", handleConnections)
 	http.HandleFunc("/report", reportHandler)
+	http.HandleFunc("/block", blockHandler)
 	http.HandleFunc("/healthz", livenessHandler)
 	http.HandleFunc("/readyz", readinessHandler)
 	http.Handle("/metrics", metricsHandler())
@@ -198,7 +199,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Persist user on first login
-	if _, _, err := upsertUser(ctx, userID); err != nil {
+	internalID, _, err := upsertUser(ctx, userID)
+	if err != nil {
 		slog.Error("Failed to upsert user", "user_id", userID, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
@@ -215,6 +217,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		slog.Info("Banned user denied connection", "user_id", userID)
 		writeError(w, http.StatusForbidden, "account_suspended", "account suspended")
 		return
+	}
+
+	// Hydrate the user's block SET in Redis before they can be matched.
+	// loadUserBlocks failure is logged but not fatal — the matchmaker would
+	// still pair them with people they've blocked, but that's a degraded
+	// behavior, not a correctness violation.
+	if subs, err := loadUserBlocks(ctx, internalID); err != nil {
+		slog.Error("Failed to load user blocks", "user_id", userID, "error", err)
+	} else {
+		matchMaker.HydrateBlocks(ctx, userID, subs)
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -243,6 +255,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		matchMaker.Remove(ctx, clientID)
 		// Clear any active session mapping
 		matchMaker.DeleteSession(ctx, clientID)
+		// Drop the cached block SET; a future connect re-hydrates from DB.
+		matchMaker.ClearBlocks(ctx, clientID)
 
 		slog.Info("Client fully disconnected", "client_id", clientID)
 	}()

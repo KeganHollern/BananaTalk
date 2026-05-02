@@ -48,6 +48,11 @@ var (
 		Help:    "Client-reported time the user spent in the matching queue before a match.",
 		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
 	})
+
+	blockedPairingsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "bananatalk_blocked_pairings_total",
+		Help: "Total number of candidate pairs the matchmaker rejected because one side had blocked the other.",
+	})
 )
 
 func init() {
@@ -58,6 +63,7 @@ func init() {
 		matchLatencySeconds,
 		connectTimeSeconds,
 		queueWaitSeconds,
+		blockedPairingsTotal,
 	)
 }
 

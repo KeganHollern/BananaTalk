@@ -126,6 +126,11 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// recordReport also persisted a block row inside its txn; reflect that in
+	// the reporter's online block SET so the matchmaker honors it before the
+	// reporter's next reconnect.
+	matchMaker.AddBlock(ctx, reporterSub, reportedSub)
+
 	if banned {
 		slog.Info("Auto-banned user", "reported_sub", reportedSub, "reported_id", reportedID)
 		// Sever any active WebSocket the banned user has open.

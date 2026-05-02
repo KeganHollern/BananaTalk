@@ -22,7 +22,7 @@ func setupTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initDB: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `TRUNCATE reports, users RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE reports, blocks, users RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	db = pool

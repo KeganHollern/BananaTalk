@@ -307,8 +307,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(ok
-            ? 'User reported. Finding new match...'
-            : 'Report failed to upload. Finding new match...'),
+            ? 'User reported and blocked from rematching. Finding new match...'
+            : 'Report failed to upload. User blocked locally. Finding new match...'),
       ),
     );
 

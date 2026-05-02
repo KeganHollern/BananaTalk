@@ -15,6 +15,17 @@ const (
 	redisNotifyPfx     = "matchmaker:notify:"
 	redisTriggerKey    = "matchmaker:trigger"
 	redisEnqueueAtHash = "matchmaker:enqueued_at"
+	redisBlocksPfx     = "matchmaker:blocks:"
+	// blocksTTL keeps a stale block SET alive long enough that a quick
+	// reconnect doesn't have to re-hydrate from Postgres, but short enough
+	// that a long-offline user's data is reaped from Redis. The set is
+	// authoritatively rebuilt on every connect and DEL'd on disconnect, so
+	// this is a safety net rather than a primary lifetime.
+	blocksTTL = 24 * time.Hour
+	// maxBlockedRejectionsPerCycle bounds work per processMatches call when
+	// the head of the queue is dominated by mutually-blocked candidates so
+	// the loop cannot starve other tickers / pub-sub events.
+	maxBlockedRejectionsPerCycle = 32
 )
 
 // MatchMaker manages the matching queue via Redis, allowing multiple backend
@@ -108,6 +119,69 @@ func (m *MatchMaker) tryMatch(ctx context.Context) (string, string, error) {
 	return result[0], result[1], nil
 }
 
+// HydrateBlocks replaces the user's block SET in Redis with `subs`. Called on
+// connect after loading the user's blocks from Postgres. Empty subs leaves no
+// key behind so SISMEMBER short-circuits.
+func (m *MatchMaker) HydrateBlocks(ctx context.Context, userID string, subs []string) {
+	key := redisBlocksPfx + userID
+	pipe := m.rdb.TxPipeline()
+	pipe.Del(ctx, key)
+	if len(subs) > 0 {
+		members := make([]any, len(subs))
+		for i, s := range subs {
+			members[i] = s
+		}
+		pipe.SAdd(ctx, key, members...)
+		pipe.Expire(ctx, key, blocksTTL)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Error("MatchMaker: failed to hydrate blocks", "user_id", userID, "error", err)
+	}
+}
+
+// AddBlock incrementally adds blockedSub to blockerSub's online block set.
+// No-op if the blocker has no Redis set (offline) — their next connect will
+// rehydrate from Postgres. Used by /report and /block when the blocker's
+// session is currently active on some backend instance.
+func (m *MatchMaker) AddBlock(ctx context.Context, blockerSub, blockedSub string) {
+	key := redisBlocksPfx + blockerSub
+	exists, err := m.rdb.Exists(ctx, key).Result()
+	if err != nil {
+		slog.Error("MatchMaker: blocks EXISTS failed", "user_id", blockerSub, "error", err)
+		return
+	}
+	if exists == 0 {
+		return
+	}
+	if err := m.rdb.SAdd(ctx, key, blockedSub).Err(); err != nil {
+		slog.Error("MatchMaker: SADD block failed", "user_id", blockerSub, "error", err)
+	}
+}
+
+// ClearBlocks removes the user's block SET from Redis on disconnect.
+func (m *MatchMaker) ClearBlocks(ctx context.Context, userID string) {
+	if err := m.rdb.Del(ctx, redisBlocksPfx+userID).Err(); err != nil {
+		slog.Error("MatchMaker: failed to clear blocks", "user_id", userID, "error", err)
+	}
+}
+
+// pairBlocked returns true if either side of the candidate pair has the
+// other in their block SET. A Redis error is treated as not-blocked so a
+// transient outage doesn't strand users in the queue forever.
+func (m *MatchMaker) pairBlocked(ctx context.Context, a, b string) bool {
+	if blocked, err := m.rdb.SIsMember(ctx, redisBlocksPfx+a, b).Result(); err == nil && blocked {
+		return true
+	} else if err != nil {
+		slog.Error("MatchMaker: SISMEMBER failed", "blocker", a, "blocked", b, "error", err)
+	}
+	if blocked, err := m.rdb.SIsMember(ctx, redisBlocksPfx+b, a).Result(); err == nil && blocked {
+		return true
+	} else if err != nil {
+		slog.Error("MatchMaker: SISMEMBER failed", "blocker", b, "blocked", a, "error", err)
+	}
+	return false
+}
+
 // SetSession records a user -> peer mapping in Redis with a 24-hour TTL.
 func (m *MatchMaker) SetSession(ctx context.Context, userID, peerID string) {
 	if err := m.rdb.Set(ctx, redisSessionPfx+userID, peerID, 24*time.Hour).Err(); err != nil {
@@ -146,6 +220,7 @@ func (m *MatchMaker) Run(ctx context.Context) {
 
 // processMatches drains all matchable pairs from the shared queue.
 func (m *MatchMaker) processMatches(ctx context.Context) {
+	rejections := 0
 	for {
 		id1, id2, err := m.tryMatch(ctx)
 		if err != nil {
@@ -154,6 +229,22 @@ func (m *MatchMaker) processMatches(ctx context.Context) {
 		}
 		if id1 == "" {
 			return
+		}
+
+		if m.pairBlocked(ctx, id1, id2) {
+			blockedPairingsTotal.Inc()
+			slog.Info("MatchMaker: rejected blocked pair", "client1", id1, "client2", id2)
+			// Re-queue both at the tail so a different candidate has a
+			// chance to land between them on the next pop.
+			if err := m.rdb.RPush(ctx, redisQueueKey, id1, id2).Err(); err != nil {
+				slog.Error("MatchMaker: requeue after block failed", "error", err)
+				return
+			}
+			rejections++
+			if rejections >= maxBlockedRejectionsPerCycle {
+				return
+			}
+			continue
 		}
 
 		slog.Info("Matching clients", "client1", id1, "client2", id2)

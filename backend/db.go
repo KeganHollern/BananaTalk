@@ -48,6 +48,17 @@ CREATE INDEX IF NOT EXISTS reports_reported_created_idx
 
 CREATE INDEX IF NOT EXISTS reports_created_idx
 	ON reports (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS blocks (
+	blocker_id BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	blocked_id BIGINT      NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	PRIMARY KEY (blocker_id, blocked_id),
+	CHECK (blocker_id <> blocked_id)
+);
+
+CREATE INDEX IF NOT EXISTS blocks_blocked_idx
+	ON blocks (blocked_id);
 `
 
 func initDB(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
@@ -136,6 +147,16 @@ func recordReport(ctx context.Context, reporterID, reportedID int64, reason, scr
 		reporterID, reportedID, reason, screenshotURL, screenshotKey,
 	); err != nil {
 		return false, fmt.Errorf("insert report: %w", err)
+	}
+
+	// Reporting implies blocking — the reporter should not be re-matched with
+	// the reported user. Idempotent so repeat reports don't error.
+	if _, err = tx.Exec(ctx,
+		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)
+		 ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
+		reporterID, reportedID,
+	); err != nil {
+		return false, fmt.Errorf("insert block: %w", err)
 	}
 
 	if _, err = tx.Exec(ctx,
@@ -302,6 +323,51 @@ func banUser(ctx context.Context, id int64) (googleSub string, changed bool, err
 		return "", false, err
 	}
 	return googleSub, false, nil
+}
+
+// insertBlock records that blockerID has blocked blockedID. Idempotent: a
+// duplicate (blocker_id, blocked_id) pair is silently ignored.
+func insertBlock(ctx context.Context, blockerID, blockedID int64) error {
+	if blockerID == blockedID {
+		return fmt.Errorf("insertBlock: cannot block self")
+	}
+	_, err := db.Exec(ctx,
+		`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)
+		 ON CONFLICT (blocker_id, blocked_id) DO NOTHING`,
+		blockerID, blockedID,
+	)
+	if err != nil {
+		return fmt.Errorf("insertBlock: %w", err)
+	}
+	return nil
+}
+
+// loadUserBlocks returns the google_subs of every user blockerID has blocked.
+// Used to hydrate the per-user block SET in Redis on connect.
+func loadUserBlocks(ctx context.Context, blockerID int64) ([]string, error) {
+	rows, err := db.Query(ctx,
+		`SELECT u.google_sub FROM blocks b
+		 JOIN users u ON u.id = b.blocked_id
+		 WHERE b.blocker_id = $1`,
+		blockerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loadUserBlocks: %w", err)
+	}
+	defer rows.Close()
+
+	var subs []string
+	for rows.Next() {
+		var sub string
+		if err := rows.Scan(&sub); err != nil {
+			return nil, fmt.Errorf("loadUserBlocks scan: %w", err)
+		}
+		subs = append(subs, sub)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("loadUserBlocks rows: %w", err)
+	}
+	return subs, nil
 }
 
 // unbanUser clears banned_at. Returns whether a state change occurred.
