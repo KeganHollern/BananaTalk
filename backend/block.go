@@ -91,3 +91,53 @@ func blockHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write([]byte(`{"blocked":true}`))
 }
+
+// blocksHandler returns the authenticated user's full block list as
+// `{"blocked_ids": [...]}`. Clients call this on launch to rehydrate their
+// local cache so blocks survive reinstalls, new devices, and long offline
+// periods. The matchmaker treats blocks as symmetric (insertBlock writes both
+// directions), so this list also covers blocks where the caller was the
+// blocked party.
+func blocksHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+
+	ctx := r.Context()
+
+	sub, ok := authenticate(ctx, r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "token invalid or expired")
+		return
+	}
+
+	userID, err := getUserIDByGoogleSub(ctx, sub)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Caller has never been seen — no row, no blocks.
+			writeBlocksResponse(w, nil)
+			return
+		}
+		slog.Error("blocks: lookup user", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+
+	subs, err := loadUserBlocks(ctx, userID)
+	if err != nil {
+		slog.Error("blocks: load", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		return
+	}
+	writeBlocksResponse(w, subs)
+}
+
+func writeBlocksResponse(w http.ResponseWriter, subs []string) {
+	if subs == nil {
+		subs = []string{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string][]string{"blocked_ids": subs})
+}

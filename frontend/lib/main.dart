@@ -45,6 +45,7 @@ class MyApp extends StatelessWidget {
 // For physical devices or iOS Simulator: Use your computer's local IP (e.g., '192.168.1.27')
 const String serverUrl = 'wss://bt.lystic.dev/ws';
 const String reportUrl = 'https://bt.lystic.dev/report';
+const String blocksUrl = 'https://bt.lystic.dev/blocks';
 // ---------------------
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -60,8 +61,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   late Signaling _signaling;
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  final ReportService _reportService =
-      ReportService(endpoint: Uri.parse(reportUrl));
+  final ReportService _reportService = ReportService(
+    endpoint: Uri.parse(reportUrl),
+    blocksEndpoint: Uri.parse(blocksUrl),
+  );
   final GlobalKey _remoteVideoKey = GlobalKey();
 
   /// When non-null, painted over the remote video to "freeze" it during the
@@ -99,6 +102,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     ));
     _connect(widget.token);
     _initRenderers();
+    // Hydrate the local block list from the server before the user can hit
+    // JOIN. Fire-and-forget: a missed sync (offline launch, server blip)
+    // falls back to whatever is already in SharedPrefs.
+    _reportService.syncFromServer(token: widget.token);
   }
 
   void _connect(String token) {

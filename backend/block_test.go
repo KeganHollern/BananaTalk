@@ -1,8 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sort"
 	"testing"
+	"time"
+
+	"google.golang.org/api/idtoken"
 )
 
 func TestInsertBlock_PersistsRow(t *testing.T) {
@@ -129,5 +137,79 @@ func TestLoadUserBlocks_EmptyForFreshUser(t *testing.T) {
 	}
 	if len(subs) != 0 {
 		t.Fatalf("expected no blocks for fresh user, got %v", subs)
+	}
+}
+
+// End-to-end coverage for the launch-time hydrate flow: post a couple of
+// blocks via POST /block, then GET /blocks and confirm the body lists both
+// targets. Guards against the "fresh install loses block list" regression.
+func TestBlocksHandler_ReturnsListAfterPosts(t *testing.T) {
+	setupTestDB(t)
+
+	// Stub auth: the bearer string is treated as the google_sub directly so
+	// each request maps cleanly to a known user.
+	stubValidator(t, func(_ context.Context, token, _ string) (*idtoken.Payload, error) {
+		return &idtoken.Payload{Subject: token, Expires: time.Now().Add(time.Hour).Unix()}, nil
+	})
+
+	// blockHandler calls matchMaker.AddBlock against Redis; back it with
+	// miniredis for the duration of the test.
+	mm, _, _ := newTestMatchMaker(t)
+	prevMM := matchMaker
+	matchMaker = mm
+	t.Cleanup(func() { matchMaker = prevMM })
+
+	post := func(blockerSub, blockedSub string) {
+		t.Helper()
+		body := bytes.NewBufferString(`{"blocked_user_id":"` + blockedSub + `"}`)
+		req := httptest.NewRequest(http.MethodPost, "/block", body)
+		req.Header.Set("Authorization", "Bearer "+blockerSub)
+		rr := httptest.NewRecorder()
+		blockHandler(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("POST /block (block %s): status=%d body=%s", blockedSub, rr.Code, rr.Body.String())
+		}
+	}
+
+	post("blocker-sub", "victim-a")
+	post("blocker-sub", "victim-b")
+
+	req := httptest.NewRequest(http.MethodGet, "/blocks", nil)
+	req.Header.Set("Authorization", "Bearer blocker-sub")
+	rr := httptest.NewRecorder()
+	blocksHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /blocks: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		BlockedIDs []string `json:"blocked_ids"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rr.Body.String())
+	}
+	got := append([]string(nil), resp.BlockedIDs...)
+	sort.Strings(got)
+	want := []string{"victim-a", "victim-b"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("blocked_ids: want %v, got %v", want, got)
+	}
+}
+
+func TestBlocksHandler_RejectsNonGet(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/blocks", nil)
+	rr := httptest.NewRecorder()
+	blocksHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /blocks: want 405, got %d", rr.Code)
+	}
+}
+
+func TestBlocksHandler_RejectsUnauthenticated(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/blocks", nil)
+	rr := httptest.NewRecorder()
+	blocksHandler(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /blocks: want 401, got %d", rr.Code)
 	}
 }
